@@ -36,6 +36,26 @@ yarn-error.log*
 !.env.local.example
 !.env.example
 
+# local credentials and secret material
+.prospectador-api-key
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+secrets/
+
+# Supabase local CLI state
+supabase/.temp/
+supabase/.branches/
+supabase/.env
+
+# local logs and runtime artifacts
+*.log
+logs/
+pids/
+
 # vercel
 .vercel
 

@@ -1,79 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendMediaMessage } from "./meta-api";
 
-// Capture the JSON body each helper POSTs to Meta so we can assert the
-// exact payload shape per media kind without hitting the network.
-interface CapturedBody {
-  type?: string;
-  image?: Record<string, unknown>;
-  video?: Record<string, unknown>;
-  document?: Record<string, unknown>;
-  audio?: Record<string, unknown>;
-}
-let captured: CapturedBody | null = null;
+const fetchMock = vi.fn();
 
-function okFetch() {
-  return vi.fn(async (_url: string, init?: RequestInit) => {
-    captured = init?.body ? (JSON.parse(init.body as string) as CapturedBody) : null;
-    return {
-      ok: true,
-      json: async () => ({ messages: [{ id: "wamid.TEST" }] }),
-    } as Response;
-  });
-}
+beforeEach(() => {
+  fetchMock.mockReset();
+  fetchMock.mockResolvedValue(new Response(JSON.stringify({ key: { id: "media-1" } }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+});
+afterEach(() => vi.unstubAllGlobals());
 
-const BASE = {
-  phoneNumberId: "test-phone",
-  accessToken: "test-token",
-  to: "1234567890",
-  link: "https://cdn.example.com/file",
-} as const;
-
-describe("sendMediaMessage — payload shape", () => {
-  beforeEach(() => {
-    captured = null;
-    vi.stubGlobal("fetch", okFetch());
-  });
-  afterEach(() => {
-    vi.unstubAllGlobals();
+describe("Evolution sendMedia payloads", () => {
+  it("sends image with caption", async () => {
+    await sendMediaMessage({ baseUrl: "https://evo", apiKey: "k", instanceName: "i", to: "123", kind: "image", link: "https://cdn/x.png", caption: "hi" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://evo/message/sendMedia/i");
+    expect(JSON.parse(init.body)).toMatchObject({ number: "123", mediatype: "image", media: "https://cdn/x.png", caption: "hi" });
   });
 
-  it("sends image with a caption and no filename", async () => {
-    await sendMediaMessage({ ...BASE, kind: "image", caption: "hello", filename: "x.png" });
-    expect(captured?.type).toBe("image");
-    expect(captured?.image).toEqual({ link: BASE.link, caption: "hello" });
-    expect(captured?.image?.filename).toBeUndefined();
+  it("sends document with filename", async () => {
+    await sendMediaMessage({ baseUrl: "https://evo", apiKey: "k", instanceName: "i", to: "123", kind: "document", link: "https://cdn/x.pdf", filename: "x.pdf" });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ mediatype: "document", fileName: "x.pdf" });
   });
 
-  it("sends document with both caption and filename", async () => {
-    await sendMediaMessage({
-      ...BASE,
-      kind: "document",
-      caption: "invoice",
-      filename: "invoice.pdf",
-    });
-    expect(captured?.type).toBe("document");
-    expect(captured?.document).toEqual({
-      link: BASE.link,
-      caption: "invoice",
-      filename: "invoice.pdf",
-    });
-  });
-
-  it("sends audio with NO caption and NO filename (Meta rejects both)", async () => {
-    await sendMediaMessage({
-      ...BASE,
-      kind: "audio",
-      caption: "should be dropped",
-      filename: "voice.ogg",
-    });
-    expect(captured?.type).toBe("audio");
-    expect(captured?.audio).toEqual({ link: BASE.link });
-  });
-
-  it("throws when no link is provided", async () => {
-    await expect(
-      sendMediaMessage({ ...BASE, link: "", kind: "image" }),
-    ).rejects.toThrow(/requires a link/);
+  it("sends audio through the WhatsApp audio endpoint", async () => {
+    await sendMediaMessage({ baseUrl: "https://evo", apiKey: "k", instanceName: "i", to: "123", kind: "audio", link: "https://cdn/a.ogg" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://evo/message/sendWhatsAppAudio/i");
+    expect(JSON.parse(init.body)).toEqual({ number: "123", audio: "https://cdn/a.ogg" });
   });
 });

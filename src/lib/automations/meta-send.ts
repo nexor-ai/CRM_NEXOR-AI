@@ -1,4 +1,4 @@
-import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/meta-api'
+import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/evolution-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   sanitizePhoneForMeta,
@@ -9,7 +9,7 @@ import {
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
-// Automation-side Meta sender.
+// Automation-side Evolution sender.
 //
 // Mirrors the logic in src/app/api/whatsapp/send/route.ts but uses
 // the service-role client (engine has no cookies) and accepts the
@@ -44,20 +44,20 @@ interface SendTemplateArgs {
 }
 
 export async function engineSendText(args: SendTextArgs): Promise<{ whatsapp_message_id: string }> {
-  return sendViaMeta({ ...args, kind: 'text' })
+  return sendViaEvolution({ ...args, kind: 'text' })
 }
 
 export async function engineSendTemplate(
   args: SendTemplateArgs,
 ): Promise<{ whatsapp_message_id: string }> {
-  return sendViaMeta({ ...args, kind: 'template' })
+  return sendViaEvolution({ ...args, kind: 'template' })
 }
 
 type SendInput =
   | (SendTextArgs & { kind: 'text' })
   | (SendTemplateArgs & { kind: 'template' })
 
-async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: string }> {
+async function sendViaEvolution(input: SendInput): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
 
   // Scope the contact + config lookups by account_id, not user_id.
@@ -92,13 +92,16 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new Error('Evolution API is not configured for this account')
+  }
+  const apiKey = decrypt(config.evolution_api_key)
+  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'template') {
       const r = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        ...transport,
         to: phone,
         templateName: input.templateName,
         language: input.language,
@@ -107,15 +110,14 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
       return r.messageId
     }
     const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      ...transport,
       to: phone,
       text: input.text,
     })
     return r.messageId
   }
 
-  // Same phone-variant retry as /api/whatsapp/send — Meta sandbox and
+  // Same phone-variant retry as /api/whatsapp/send — Evolution number validation and
   // numbers registered with/without a trunk 0 both require this to
   // reliably land a message.
   const variants = phoneVariants(sanitized)
@@ -141,7 +143,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   }
 
   // Persist the sent message so it appears in the inbox with a real
-  // Meta message id. sender_type='bot' distinguishes automation sends
+  // WhatsApp transport message id. sender_type='bot' distinguishes automation sends
   // from manual agent sends.
   const content_type = input.kind === 'template' ? 'template' : 'text'
   const content_text = input.kind === 'text' ? input.text : null
@@ -157,9 +159,9 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     status: 'sent',
   })
   if (msgErr) {
-    // Meta already has the message; record the DB error but don't pretend
+    // Evolution already has the message; record the DB error but don't pretend
     // the send failed. The engine wraps this in a log line.
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
   }
 
   await db

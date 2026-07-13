@@ -7,7 +7,7 @@
 //   createBroadcast()  — validate, resolve contacts, insert the
 //                        `broadcasts` row + `broadcast_recipients`
 //                        rows (status 'pending'), return a plan.
-//   deliverBroadcast() — send each recipient's template via Meta
+//   deliverBroadcast() — send each recipient's template via Evolution
 //                        (phone-variant retry), stamp each recipient
 //                        row + the aggregate counts, finalize status.
 //
@@ -18,7 +18,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
+import { sendTemplateMessage } from '@/lib/whatsapp/evolution-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import {
   sanitizePhoneForMeta,
@@ -66,8 +66,9 @@ export interface BroadcastPlan {
   broadcastId: string;
   templateName: string;
   templateLanguage: string;
-  phoneNumberId: string;
-  accessToken: string;
+  evolutionBaseUrl: string;
+  evolutionInstance: string;
+  evolutionApiKey: string;
   templateRow: MessageTemplate | null;
   planned: PlannedRecipient[];
   /** Phones rejected up front (invalid E.164) — counted as failed. */
@@ -110,7 +111,7 @@ export async function createBroadcast(
   }
 
   // Config (fail fast + provides the audit trail owner already resolved
-  // by the caller). Meta send needs phone_number_id + decrypted token.
+  // by the caller). Evolution send needs base URL + instance + decrypted apikey.
   const { data: config, error: configError } = await db
     .from('whatsapp_config')
     .select('*')
@@ -123,7 +124,10 @@ export async function createBroadcast(
       400
     );
   }
-  const accessToken = decrypt(config.access_token);
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new BroadcastError('whatsapp_not_configured', 'Evolution API is not configured. Please connect an instance first.', 400);
+  }
+  const apiKey = decrypt(config.evolution_api_key);
 
   // Template row (once) for header/button components; guard a
   // malformed local row rather than N identical opaque failures.
@@ -137,7 +141,7 @@ export async function createBroadcast(
   if (rawTemplateRow && !isMessageTemplate(rawTemplateRow)) {
     throw new BroadcastError(
       'template_malformed',
-      'Template row is malformed locally — run "Sync from Meta" in Settings to repair it before broadcasting.',
+      'Template row is malformed locally — run "review the local preset" in Settings to repair it before broadcasting.',
       500
     );
   }
@@ -238,8 +242,9 @@ export async function createBroadcast(
     broadcastId: broadcast.id,
     templateName,
     templateLanguage,
-    phoneNumberId: config.phone_number_id,
-    accessToken,
+    evolutionBaseUrl: config.evolution_base_url,
+    evolutionInstance: config.evolution_instance,
+    evolutionApiKey: apiKey,
     templateRow,
     planned,
     rejected,
@@ -254,7 +259,7 @@ export async function createBroadcast(
  *
  * The per-status count columns on `broadcasts` are owned by the DB
  * aggregate trigger (migrations 003/005): each recipient-row update
- * below advances them automatically, and later Meta delivery/read
+ * below advances them automatically, and later Evolution delivery/read
  * webhooks keep advancing them. We therefore never write those columns
  * here — only the terminal `status` — otherwise a manual value would
  * race and clobber the trigger-maintained counts.
@@ -273,8 +278,9 @@ export async function deliverBroadcast(
     for (const variant of variants) {
       try {
         const result = await sendTemplateMessage({
-          phoneNumberId: plan.phoneNumberId,
-          accessToken: plan.accessToken,
+          baseUrl: plan.evolutionBaseUrl,
+          instance: plan.evolutionInstance,
+          apiKey: plan.evolutionApiKey,
           to: variant,
           templateName: plan.templateName,
           language: plan.templateLanguage,

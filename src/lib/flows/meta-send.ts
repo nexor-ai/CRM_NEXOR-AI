@@ -6,7 +6,7 @@ import {
   type InteractiveButton,
   type InteractiveListSection,
   type MediaKind,
-} from '@/lib/whatsapp/meta-api'
+} from '@/lib/whatsapp/evolution-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   sanitizePhoneForMeta,
@@ -17,7 +17,7 @@ import {
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
-// Flows-side Meta sender (interactive variants).
+// Flows-side Evolution sender (interactive variants).
 //
 // Mirrors src/lib/automations/meta-send.ts (engineSendText /
 // engineSendTemplate) but emits interactive button + list messages.
@@ -86,12 +86,15 @@ export async function engineSendText(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new Error('Evolution API is not configured for this account')
+  }
+  const apiKey = decrypt(config.evolution_api_key)
+  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      ...transport,
       to: phone,
       text: args.text,
     })
@@ -129,7 +132,7 @@ export async function engineSendText(
     status: 'sent',
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
   }
 
   await db
@@ -150,10 +153,10 @@ interface SendMediaEngineArgs {
   conversationId: string
   contactId: string
   kind: MediaKind
-  /** Public URL Meta fetches at send time. */
+  /** Public URL Evolution fetches at send time. */
   link: string
   caption?: string
-  /** Document-only; ignored by Meta for image/video. */
+  /** Document-only; ignored by Evolution for image/video. */
   filename?: string
 }
 
@@ -195,12 +198,15 @@ export async function engineSendMedia(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new Error('Evolution API is not configured for this account')
+  }
+  const apiKey = decrypt(config.evolution_api_key)
+  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendMediaMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      ...transport,
       to: phone,
       kind: args.kind,
       link: args.link,
@@ -246,7 +252,7 @@ export async function engineSendMedia(
     status: 'sent',
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
   }
 
   await db
@@ -292,30 +298,30 @@ interface SendInteractiveListEngineArgs {
  * surfaces it with the "Button reply" affordance and the conversation
  * thread reflects the bot's prompt.
  *
- * Returns the Meta message id so the caller (engine) can stash it on
+ * Returns the WhatsApp transport message id so the caller (engine) can stash it on
  * the `flow_runs.last_prompt_message_id` field for later reference.
  */
 export async function engineSendInteractiveButtons(
   args: SendInteractiveButtonsEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
-  return sendInteractiveViaMeta({ ...args, kind: 'buttons' })
+  return sendInteractiveViaEvolution({ ...args, kind: 'buttons' })
 }
 
 /**
  * Send an interactive-list WhatsApp message from the Flows engine.
- * Used when the flow needs more than 3 options (Meta's button cap).
+ * Used when the flow needs more than 3 options (WhatsApp's button cap).
  */
 export async function engineSendInteractiveList(
   args: SendInteractiveListEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
-  return sendInteractiveViaMeta({ ...args, kind: 'list' })
+  return sendInteractiveViaEvolution({ ...args, kind: 'list' })
 }
 
 type SendInput =
   | (SendInteractiveButtonsEngineArgs & { kind: 'buttons' })
   | (SendInteractiveListEngineArgs & { kind: 'list' })
 
-async function sendInteractiveViaMeta(
+async function sendInteractiveViaEvolution(
   input: SendInput,
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
@@ -347,13 +353,16 @@ async function sendInteractiveViaMeta(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new Error('Evolution API is not configured for this account')
+  }
+  const apiKey = decrypt(config.evolution_api_key)
+  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'buttons') {
       const r = await sendInteractiveButtons({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        ...transport,
         to: phone,
         bodyText: input.bodyText,
         buttons: input.buttons,
@@ -363,8 +372,7 @@ async function sendInteractiveViaMeta(
       return r.messageId
     }
     const r = await sendInteractiveList({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      ...transport,
       to: phone,
       bodyText: input.bodyText,
       buttonLabel: input.buttonLabel,
@@ -376,8 +384,8 @@ async function sendInteractiveViaMeta(
   }
 
   // Same phone-variant retry as automations/meta-send.ts. Numbers
-  // registered with/without a trunk 0 + Meta's sandbox quirks all
-  // need this to reliably land a message.
+  // registered with/without a trunk 0 + WhatsApp number-format quirks
+  // all need this to reliably land a message.
   const variants = phoneVariants(sanitized)
   let workingPhone = sanitized
   let waMessageId = ''
@@ -418,7 +426,7 @@ async function sendInteractiveViaMeta(
     status: 'sent',
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
   }
 
   await db

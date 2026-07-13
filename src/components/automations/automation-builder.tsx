@@ -574,7 +574,7 @@ function SendTemplateFields({
         })}
         {current && !hasMatch && (
           <option value={current}>
-            {templateName} ({language || "unknown"}) — not in approved list
+            {templateName} ({language || "unknown"}) — not found in local presets
           </option>
         )}
       </select>
@@ -972,12 +972,17 @@ function StepRenderer({
   parentScope: ParentScope
   parentPath: StepPath
 } & Omit<StepListProps, "steps" | "parentPath">) {
-  const path: StepPath = [
-    ...parentPath,
+  // When nested in a branch, `parentPath` already ends with a placeholder
+  // branch marker (index: 0) from ConditionBranches — replace it with the
+  // real index instead of appending, or the path gains a duplicate branch
+  // marker and mapAtPath/walkBranches silently fail to reach this step.
+  const path: StepPath =
     parentScope.kind === "root"
-      ? { kind: "root", index }
-      : { kind: "branch", parentCid: parentScope.parentCid, branch: parentScope.branch, index },
-  ]
+      ? [...parentPath, { kind: "root", index }]
+      : [
+          ...parentPath.slice(0, -1),
+          { kind: "branch", parentCid: parentScope.parentCid, branch: parentScope.branch, index },
+        ]
   const meta = STEP_META[step.step_type]
   const Icon = meta.icon
   const expanded = props.expandedId === step.cid
@@ -1311,22 +1316,29 @@ function StepEditor({
               <option value="time_of_day">Time of day</option>
             </select>
           </FieldBlock>
-          <FieldBlock label="Operand">
-            <Input
-              placeholder={
-                cfg.subject === "time_of_day"
-                  ? "HH:mm-HH:mm"
-                  : cfg.subject === "contact_field"
-                  ? "name / email / company"
-                  : cfg.subject === "tag_presence"
-                  ? "tag id"
-                  : ""
-              }
-              value={(cfg.operand as string) ?? ""}
-              onChange={(e) => set({ operand: e.target.value })}
-              className="bg-muted text-foreground"
-            />
-          </FieldBlock>
+          {cfg.subject === "time_of_day" ? (
+            <FieldBlock label="Horário">
+              <TimeOfDayFields
+                operand={(cfg.operand as string) ?? ""}
+                onChange={(operand) => set({ operand })}
+              />
+            </FieldBlock>
+          ) : (
+            <FieldBlock label="Operand">
+              <Input
+                placeholder={
+                  cfg.subject === "contact_field"
+                    ? "name / email / company"
+                    : cfg.subject === "tag_presence"
+                    ? "tag id"
+                    : ""
+                }
+                value={(cfg.operand as string) ?? ""}
+                onChange={(e) => set({ operand: e.target.value })}
+                className="bg-muted text-foreground"
+              />
+            </FieldBlock>
+          )}
           {(cfg.subject === "contact_field" || cfg.subject === "message_content") && (
             <FieldBlock label="Value">
               <Input
@@ -1366,6 +1378,136 @@ function StepEditor({
     default:
       return null
   }
+}
+
+const WEEKDAYS: { key: string; label: string }[] = [
+  { key: "mon", label: "Seg" },
+  { key: "tue", label: "Ter" },
+  { key: "wed", label: "Qua" },
+  { key: "thu", label: "Qui" },
+  { key: "fri", label: "Sex" },
+  { key: "sat", label: "Sáb" },
+  { key: "sun", label: "Dom" },
+]
+
+type DaySchedule = { closed: boolean; from: string; to: string }
+
+function isWeeklyOperand(operand: string): boolean {
+  return /(^|,)\s*(sun|mon|tue|wed|thu|fri|sat)\s*:/i.test(operand)
+}
+
+function parseWeeklySchedule(operand: string): Record<string, DaySchedule> {
+  const schedule: Record<string, DaySchedule> = {}
+  for (const { key } of WEEKDAYS) schedule[key] = { closed: false, from: "08:00", to: "18:00" }
+  operand.split(",").forEach((part) => {
+    const [day, ...rest] = part.trim().split(":")
+    const key = day?.toLowerCase()
+    if (!key || !(key in schedule)) return
+    const value = rest.join(":").trim()
+    if (value.toLowerCase() === "closed") {
+      schedule[key] = { ...schedule[key], closed: true }
+      return
+    }
+    const [from, to] = value.split("-")
+    if (from && to) schedule[key] = { closed: false, from, to }
+  })
+  return schedule
+}
+
+function serializeWeeklySchedule(schedule: Record<string, DaySchedule>): string {
+  return WEEKDAYS.map(({ key }) => {
+    const d = schedule[key]
+    return `${key}:${d.closed ? "closed" : `${d.from}-${d.to}`}`
+  }).join(",")
+}
+
+// The "Time of day" condition subject supports two operand shapes: a
+// legacy single window "HH:mm-HH:mm" applied every day, and a weekly
+// schedule "mon:08:00-20:00,...,sun:closed" for businesses whose hours
+// vary by day (see evaluateCondition in src/lib/automations/engine.ts).
+function TimeOfDayFields({
+  operand,
+  onChange,
+}: {
+  operand: string
+  onChange: (operand: string) => void
+}) {
+  const weekly = isWeeklyOperand(operand)
+  const schedule = parseWeeklySchedule(operand)
+
+  const patchDay = (key: string, patch: Partial<DaySchedule>) =>
+    onChange(serializeWeeklySchedule({ ...schedule, [key]: { ...schedule[key], ...patch } }))
+
+  return (
+    <div className="space-y-2">
+      <div className="flex overflow-hidden rounded-md border border-border text-xs">
+        <button
+          type="button"
+          onClick={() => onChange(weekly ? "18:00-09:00" : operand)}
+          className={cn(
+            "flex-1 px-2 py-1 transition-colors",
+            !weekly ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+          )}
+        >
+          Janela única
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange(serializeWeeklySchedule(schedule))}
+          className={cn(
+            "flex-1 px-2 py-1 transition-colors",
+            weekly ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+          )}
+        >
+          Horário semanal
+        </button>
+      </div>
+      {weekly ? (
+        <div className="space-y-1.5">
+          {WEEKDAYS.map(({ key, label }) => {
+            const d = schedule[key]
+            return (
+              <div key={key} className="flex items-center gap-2 text-xs">
+                <span className="w-7 flex-shrink-0 text-muted-foreground">{label}</span>
+                <label className="flex flex-shrink-0 items-center gap-1 text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={d.closed}
+                    onChange={(e) => patchDay(key, { closed: e.target.checked })}
+                  />
+                  Fechado
+                </label>
+                {!d.closed && (
+                  <>
+                    <input
+                      type="time"
+                      value={d.from}
+                      onChange={(e) => patchDay(key, { from: e.target.value })}
+                      className="rounded border border-border bg-muted px-1 py-0.5 text-foreground"
+                    />
+                    <span className="text-muted-foreground">–</span>
+                    <input
+                      type="time"
+                      value={d.to}
+                      onChange={(e) => patchDay(key, { to: e.target.value })}
+                      className="rounded border border-border bg-muted px-1 py-0.5 text-foreground"
+                    />
+                  </>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <Input
+          placeholder="HH:mm-HH:mm"
+          value={operand}
+          onChange={(e) => onChange(e.target.value)}
+          className="bg-muted text-foreground"
+        />
+      )}
+    </div>
+  )
 }
 
 function FieldBlock({

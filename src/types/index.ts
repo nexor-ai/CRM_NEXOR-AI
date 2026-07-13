@@ -233,21 +233,25 @@ export interface MessageReaction {
 export interface WhatsAppConfig {
   id: string;
   user_id: string;
-  phone_number_id: string;
-  waba_id?: string;
-  access_token: string;
+  phone_number_id?: string; // legacy Meta column; runtime uses evolution_instance.
+  waba_id?: string; // legacy Meta column; runtime uses evolution_base_url/evolution_instance.
+  access_token?: string;
   verify_token?: string;
+  evolution_base_url?: string;
+  evolution_instance?: string;
+  evolution_api_key?: string;
+  connection_state?: string;
   status: 'connected' | 'disconnected';
   connected_at?: string;
   /**
-   * Set when POST /{phone_number_id}/register last succeeded. NULL
+   * Legacy Meta registration timestamp. NULL
    * means the number was saved but never actually subscribed for
    * webhooks on Meta's side — inbound events will be silently lost.
    */
   registered_at?: string;
-  /** Set when POST /{waba_id}/subscribed_apps last succeeded. */
+  /** Legacy Meta field — NULL on Evolution deployments. */
   subscribed_apps_at?: string;
-  /** Last error from /register; cleared on success. */
+  /** Legacy Meta field — NULL on Evolution deployments. */
   last_registration_error?: string;
 }
 

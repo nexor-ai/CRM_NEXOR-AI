@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
@@ -77,6 +77,25 @@ const OPERATOR_OPTIONS: { value: CustomFieldOperator; label: string }[] = [
   { value: 'contains', label: 'contains' },
 ];
 
+// Accepts one phone per line, optionally `phone,name` (CSV) or `phone\tname`
+// (pasted from a spreadsheet). Blank lines and a header row starting with
+// "phone" are ignored so pasting a CSV with a header doesn't create a junk
+// contact.
+function parseCsvContacts(raw: string): { phone: string; name?: string }[] {
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^phone\b/i.test(line))
+    .map((line): { phone: string; name?: string } | null => {
+      const [rawPhone, rawName] = line.split(/[,;\t]/);
+      const phone = (rawPhone ?? '').replace(/[^\d+]/g, '').trim();
+      const name = rawName?.trim();
+      return phone ? { phone, name: name || undefined } : null;
+    })
+    .filter((row) => row !== null);
+}
+
 export function Step2SelectAudience({
   audience,
   onUpdate,
@@ -89,6 +108,25 @@ export function Step2SelectAudience({
   const [loadingFields, setLoadingFields] = useState(false);
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [loadingCount, setLoadingCount] = useState(false);
+  const [csvText, setCsvText] = useState('');
+  const [csvFileError, setCsvFileError] = useState<string | null>(null);
+  const csvFileRef = useRef<HTMLInputElement>(null);
+
+  function applyCsvText(text: string) {
+    setCsvText(text);
+    const parsed = parseCsvContacts(text);
+    onUpdate({ ...audience, csvContacts: parsed.length > 0 ? parsed : undefined });
+  }
+
+  async function handleCsvFile(file: File) {
+    setCsvFileError(null);
+    if (file.size > 2 * 1024 * 1024) {
+      setCsvFileError('File is too large (max 2 MB).');
+      return;
+    }
+    const text = await file.text();
+    applyCsvText(text);
+  }
 
   // Tags are used both by the primary "Filter by Tags" audience type
   // AND by the exclude-list below — so always load once on mount.
@@ -386,6 +424,50 @@ export function Step2SelectAudience({
               />
             </div>
           )}
+        </div>
+      )}
+
+      {audience.type === 'csv' && (
+        <div className="space-y-3 rounded-xl border border-border bg-card/50 p-4">
+          <p className="text-sm font-medium text-foreground">Upload or paste phone numbers</p>
+          <div className="flex items-center gap-2">
+            <input
+              ref={csvFileRef}
+              type="file"
+              accept=".csv,text/csv,text/plain"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleCsvFile(file);
+                e.target.value = '';
+              }}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => csvFileRef.current?.click()}
+              className="border-border text-foreground"
+            >
+              <Upload className="h-4 w-4" />
+              Upload CSV file
+            </Button>
+            {csvFileError && (
+              <span className="text-xs text-red-400">{csvFileError}</span>
+            )}
+          </div>
+          <textarea
+            value={csvText}
+            onChange={(e) => applyCsvText(e.target.value)}
+            placeholder={'One phone per line, e.g.\n+15551234567,Jane Doe\n+15557654321'}
+            rows={6}
+            className="w-full rounded-lg border border-border bg-muted px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary"
+          />
+          <p className="text-xs text-muted-foreground">
+            {(audience.csvContacts?.length ?? 0) > 0
+              ? `${audience.csvContacts?.length} valid phone number${audience.csvContacts?.length === 1 ? '' : 's'} parsed.`
+              : 'Paste numbers above or upload a .csv/.txt file — one per line, optionally followed by a name.'}
+          </p>
         </div>
       )}
 

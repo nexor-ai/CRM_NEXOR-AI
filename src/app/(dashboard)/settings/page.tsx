@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, type ReactNode } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 import { useAuth } from '@/hooks/use-auth';
 import { useTheme } from '@/hooks/use-theme';
@@ -22,21 +22,33 @@ import {
 } from '@/components/settings/settings-sections';
 
 export default function SettingsPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { defaultCurrency } = useAuth();
   const { mode } = useTheme();
 
-  // The URL (`?tab=`) is the single source of truth for the active
-  // section — deep-linkable, and it keeps the existing links in the
-  // app sidebar/header working. Legacy tab values (tags, custom-fields)
-  // resolve onto their new home; unknown/empty → the Overview landing.
-  const section = resolveSection(searchParams.get('tab'));
+  // The URL (`?tab=`) is still the source of truth for deep-linking, but
+  // the active section is mirrored into local state rather than derived
+  // directly from `searchParams` on every render. In this Next.js build,
+  // `router.replace()` with only the query string changing (same
+  // pathname) updates the router's internal state but calls
+  // `history.replaceState` with the *previous* URL — the address bar
+  // never updates and `useSearchParams()` never re-fires, so clicking
+  // between rail items silently did nothing. Driving the panel from
+  // local state (updated synchronously on click) sidesteps that; the
+  // effect below still keeps it in sync for direct links / back-forward.
+  const [section, setSection] = useState<SettingsSection>(() =>
+    resolveSection(searchParams.get('tab')),
+  );
+
+  useEffect(() => {
+    setSection(resolveSection(searchParams.get('tab')));
+  }, [searchParams]);
 
   const go = (next: SettingsSection) => {
+    setSection(next);
     const params = new URLSearchParams(searchParams.toString());
     params.set('tab', next);
-    router.replace(`/settings?${params.toString()}`, { scroll: false });
+    window.history.replaceState(null, '', `/settings?${params.toString()}`);
   };
 
   // Cheap, fetch-free rail hints. The Overview landing carries the

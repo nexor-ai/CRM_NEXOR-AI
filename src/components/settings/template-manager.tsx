@@ -10,7 +10,6 @@ import {
   AlertCircle,
   X,
   Pencil,
-  RotateCcw,
   Upload,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
@@ -46,7 +45,6 @@ import type {
   TemplateButton,
   TemplateSampleValues,
 } from '@/types';
-import { templateStatusConfig } from '@/lib/template-status';
 import {
   extractVariableIndices,
   TEMPLATE_LIMITS,
@@ -280,13 +278,13 @@ export function TemplateManager() {
       // immediately should not show a stale list.
       if (user) await fetchTemplates(user.id);
       toast.success(
-        data.dry_run
+        data.local_preset
           ? isEdit
-            ? 'Template updated (dry-run — no Meta call)'
-            : 'Template saved (dry-run — no Meta call)'
+            ? 'Preset updated locally.'
+            : 'Preset created locally.'
           : isEdit
-            ? 'Edit submitted — Meta typically reviews within 24 hours.'
-            : 'Submitted to Meta — typical review time is 24 hours. Status updates automatically.',
+            ? 'Preset updated.'
+            : 'Preset created.',
       );
       setDialogOpen(false);
       setForm(emptyForm);
@@ -299,7 +297,7 @@ export function TemplateManager() {
     }
   }
 
-  async function handleSyncFromMeta() {
+  async function handleRefreshPresets() {
     if (!user) return;
     setSyncing(true);
     try {
@@ -309,7 +307,7 @@ export function TemplateManager() {
         throw new Error(data?.error || `Sync failed (HTTP ${res.status})`);
       }
       toast.success(
-        `Synced ${data.total} template${data.total === 1 ? '' : 's'} from Meta` +
+        `${data.total} local preset${data.total === 1 ? '' : 's'}` +
           (data.inserted || data.updated
             ? ` (${data.inserted} new, ${data.updated} updated)`
             : ''),
@@ -463,7 +461,7 @@ export function TemplateManager() {
     }
     if (file.size > MEDIA_MAX_BYTES_BY_KIND.image) {
       toast.error(
-        `Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — Meta's limit is 5 MB.`,
+        `Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB.`,
       );
       return;
     }
@@ -484,18 +482,18 @@ export function TemplateManager() {
       <SettingsPanelHead
         title="Message templates"
         description={
-          'Create templates and submit them to Meta for approval. Use "Sync from Meta" to pull templates approved elsewhere.'
+          'Create local WhatsApp presets for Evolution. No external approval or sync is required.'
         }
         action={
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
-              onClick={handleSyncFromMeta}
+              onClick={handleRefreshPresets}
               disabled={syncing}
-              title="Pull approved templates from your Meta WhatsApp Business Account"
+              title="Refresh local Evolution template presets"
             >
               <RefreshCw className={`size-4 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing…' : 'Sync from Meta'}
+              {syncing ? 'Syncing…' : 'Refresh presets'}
             </Button>
             <Button onClick={openCreate}>
               <Plus className="size-4" />
@@ -517,8 +515,6 @@ export function TemplateManager() {
       ) : (
         <div className="grid gap-3 xl:grid-cols-2">
           {templates.map((template) => {
-            const statusKey = template.status || 'DRAFT';
-            const status = templateStatusConfig[statusKey];
             return (
               <Card key={template.id}>
                 <CardContent className="flex items-start justify-between pt-4">
@@ -530,8 +526,8 @@ export function TemplateManager() {
                       >
                         {template.category}
                       </Badge>
-                      <Badge className={`text-xs border ${status.classes}`}>
-                        {status.label}
+                      <Badge className="text-xs border bg-primary/20 text-primary border-primary/30">
+                        Active
                       </Badge>
                       {template.language && (
                         <span className="text-xs text-muted-foreground uppercase">
@@ -547,7 +543,7 @@ export function TemplateManager() {
                                 ? 'text-yellow-400'
                                 : 'text-red-400'
                           }`}
-                          title="Meta quality score"
+                          title="Local preset (no quality score on Evolution)"
                         >
                           {template.quality_score}
                         </span>
@@ -571,47 +567,24 @@ export function TemplateManager() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0 ml-2">
-                    {statusKey === 'APPROVED' && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => openEdit(template)}
-                        title="Editing triggers Meta re-review — status flips to PENDING."
-                        aria-label="Edit template"
-                        className="text-muted-foreground hover:text-primary hover:bg-primary/10 h-8 px-2"
-                      >
-                        <Pencil className="size-3.5" />
-                        Edit
-                      </Button>
-                    )}
-                    {(statusKey === 'REJECTED' || statusKey === 'PAUSED') && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => openEdit(template)}
-                        title="Edit the template and resubmit to Meta for review."
-                        aria-label="Edit and resubmit template"
-                        className="text-muted-foreground hover:text-primary hover:bg-primary/10 h-8 px-2"
-                      >
-                        <RotateCcw className="size-3.5" />
-                        Resubmit
-                      </Button>
-                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => openEdit(template)}
+                      title="Local presets are always editable. No external review on Evolution."
+                      aria-label="Edit template"
+                      className="text-muted-foreground hover:text-primary hover:bg-primary/10 h-8 px-2"
+                    >
+                      <Pencil className="size-3.5" />
+                      Edit
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
                       onClick={() => setTemplateToDelete(template)}
                       disabled={deletingId === template.id}
-                      aria-label={
-                        template.meta_template_id
-                          ? 'Delete template from Meta and locally'
-                          : 'Delete template locally'
-                      }
-                      title={
-                        template.meta_template_id
-                          ? 'Delete from Meta and locally'
-                          : 'Delete locally'
-                      }
+                      aria-label="Delete preset (local only)"
+                      title="Delete local preset"
                       className="text-muted-foreground hover:text-red-400 hover:bg-red-950/30 h-8 w-8"
                     >
                       {deletingId === template.id ? (
@@ -645,8 +618,8 @@ export function TemplateManager() {
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
               {editingId
-                ? 'Save your changes to re-submit to Meta. Status will flip back to PENDING during review.'
-                : 'Build a template and submit it to Meta for approval. Once approved, you can use it in broadcasts and the inbox.'}
+                ? 'Save your changes. Evolution uses presets immediately, no approval step.'
+                : 'Build a local preset for Evolution. Once saved, you can use it in broadcasts and the inbox.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -654,10 +627,9 @@ export function TemplateManager() {
             <div className="flex items-start gap-2 rounded border border-amber-700/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
               <AlertCircle className="size-4 mt-0.5 shrink-0" />
               <p>
-                AUTHENTICATION templates have a fixed body + OTP button shape
-                that needs a different builder. Create them in Meta WhatsApp
-                Manager for now and use <strong>Sync from Meta</strong> to
-                bring them in.
+                AUTHENTICATION presets have a fixed body + OTP button shape
+                that needs a dedicated local builder. For now, use Utility or
+                Marketing presets with Evolution.
               </p>
             </div>
           )}
@@ -674,7 +646,7 @@ export function TemplateManager() {
               />
               <p className="text-[11px] text-muted-foreground">
                 {editingId
-                  ? 'Name is fixed once a template exists on Meta — create a new template to change it.'
+                  ? 'Name is fixed once a local preset exists — create a new preset to change it.'
                   : 'Lowercase letters, digits, and underscores only.'}
               </p>
             </div>
@@ -727,11 +699,11 @@ export function TemplateManager() {
                 </datalist>
                 <p className="text-[11px] text-muted-foreground">
                   {editingId
-                    ? 'Language is fixed once a template exists on Meta.'
+                    ? 'Language is fixed once a local preset exists.'
                     : (
                         <>
-                          Must match the exact code on Meta — <code>en_US</code>{' '}
-                          and <code>en</code> are distinct.
+                          Language code, e.g. <code>en_US</code>{' '}
+                          or <code>pt_BR</code>.
                         </>
                       )}
                 </p>
@@ -790,7 +762,7 @@ export function TemplateManager() {
                     <Input
                       id="template-header-sample"
                       aria-label="Sample value for header variable"
-                      placeholder="Sample value for {{1}} (required for Meta review)"
+                      placeholder="Sample value for {{1}}"
                       value={form.header_sample}
                       onChange={(e) =>
                         setForm({ ...form, header_sample: e.target.value })
@@ -853,8 +825,8 @@ export function TemplateManager() {
                   )}
                   <p className="text-[11px] text-muted-foreground leading-relaxed">
                     {form.header_format === 'image'
-                      ? 'Upload a JPEG/PNG (≤5 MB, ≥800×418 px recommended) or paste a public HTTPS link — we upload it to Meta for review automatically.'
-                      : 'Must be a publicly accessible HTTPS link. Meta fetches it once during review, so it needs to stay live for ~24 hrs.'}
+                      ? 'Upload a JPEG/PNG (≤5 MB, ≥800×418 px recommended) or paste a public HTTPS link — Evolution fetches the URL each time the preset is sent.'
+                      : 'Must be a publicly accessible HTTPS link. Evolution fetches it each time the preset is sent, so it needs to stay live.'}
                     {form.header_format === 'video' &&
                       ' Recommended: MP4 / 3GPP, ≤16 MB, ≤60 seconds.'}
                     {form.header_format === 'document' &&
@@ -884,7 +856,7 @@ export function TemplateManager() {
               {bodyVarCount > 0 && (
                 <div className="space-y-1.5 pt-1">
                   <Label className="text-[11px] text-muted-foreground">
-                    Sample values (Meta uses these to review your template)
+                    Sample values (optional — help you preview the preset)
                   </Label>
                   {form.body_samples.map((val, i) => {
                     const inputId = `template-body-sample-${i}`;
@@ -1076,18 +1048,17 @@ export function TemplateManager() {
                   {editingId ? 'Saving…' : 'Submitting…'}
                 </>
               ) : editingId ? (
-                'Save & Resubmit'
+                'Save Changes'
               ) : (
-                'Submit for Approval'
+                'Save Preset'
               )}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Confirm-delete dialog. Surfacing the meta_template_id case
-          separately so users understand a real Meta delete is happening,
-          not just a local cleanup. */}
+      {/* Confirm-delete dialog. Local preset only — there is no remote
+          catalog to clean up on Evolution. */}
       <Dialog
         open={templateToDelete !== null}
         onOpenChange={(open) => {
@@ -1096,11 +1067,9 @@ export function TemplateManager() {
       >
         <DialogContent className="bg-popover border-border sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-popover-foreground">Delete template?</DialogTitle>
+            <DialogTitle className="text-popover-foreground">Delete preset?</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              {templateToDelete?.meta_template_id
-                ? `"${templateToDelete?.name}" will be deleted from Meta and from wacrm. Active broadcasts using this template will start failing on their next send. This can't be undone.`
-                : `"${templateToDelete?.name}" will be deleted from wacrm. It was never submitted to Meta, so no remote cleanup is needed.`}
+              {`"${templateToDelete?.name}" will be permanently deleted. Active broadcasts using this preset will start failing on their next send. This can't be undone.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="bg-popover border-border">

@@ -1,6 +1,6 @@
 /**
  * Translate our local template row shape into the `components` array
- * shape that Meta's POST /{waba_id}/message_templates endpoint expects.
+ * local preset component shape retained for backwards-compatible template editing.
  *
  * Keep this function pure and JSON-shaped — the submit route and the
  * (future) edit route both call it, and unit tests assert the exact

@@ -433,7 +433,7 @@ export function Step3Personalize({
           <span className="font-mono font-semibold">
             {unmappedKeys.join(', ')}
           </span>
-          . Otherwise those placeholders will ship to Meta as empty strings.
+          . Otherwise those placeholders will ship as empty strings.
         </div>
       )}
 

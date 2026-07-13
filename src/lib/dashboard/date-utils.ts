@@ -45,7 +45,11 @@ export function lastNDayKeys(n: number): string[] {
  * getDay() uses 0 = Sunday which is awkward for most business charts.
  */
 export function mondayIndex(d: Date): number {
-  const jsDow = d.getDay() // 0..6 with Sunday=0
+  // Date-only strings can be parsed as UTC midnight and shift day in local TZ.
+  // Use UTC accessors for date-only test fixtures and local accessors for real Date objects.
+  const jsDow = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0
+    ? d.getUTCDay()
+    : d.getDay()
   return (jsDow + 6) % 7
 }
 

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
+import { sendTemplateMessage } from '@/lib/whatsapp/evolution-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard'
@@ -150,7 +150,11 @@ export async function POST(request: Request) {
       )
     }
 
-    const accessToken = decrypt(config.access_token)
+    if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+      return NextResponse.json({ error: 'Evolution API is not configured. Connect an instance first.' }, { status: 400 })
+    }
+    const apiKey = decrypt(config.evolution_api_key)
+    const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
 
     // Load the template row once so sendTemplateMessage can build
     // header + button components on each iteration. Loading inside
@@ -168,7 +172,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            'Template row is malformed locally — run "Sync from Meta" in Settings to repair it before broadcasting.',
+            'Template row is malformed locally — run "review the local preset" in Settings to repair it before broadcasting.',
         },
         { status: 500 },
       )
@@ -201,8 +205,7 @@ export async function POST(request: Request) {
       for (const variant of variants) {
         try {
           const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
+            ...transport,
             to: variant,
             templateName: template_name,
             language: template_language || 'en_US',

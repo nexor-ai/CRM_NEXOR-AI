@@ -6,7 +6,7 @@
 // Given a conversation and message params, this:
 //   1. validates the params for the message type,
 //   2. loads the conversation + contact + WhatsApp config,
-//   3. sends to Meta (with phone-variant retry + contact auto-fix),
+//   3. sends to Evolution (with phone-variant retry + contact auto-fix),
 //   4. persists the message + updates the conversation,
 //   5. pauses any active Flow run for the contact (agent stepped in).
 //
@@ -16,7 +16,7 @@
 // their respective response shapes (internal `{ error }` vs the v1
 // envelope). Behaviour is identical to the original inline route —
 // this is a straight extraction so the public endpoint can reuse it
-// without duplicating ~250 lines of Meta plumbing.
+// without duplicating ~250 lines of WhatsApp transport plumbing.
 // ============================================================
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -26,7 +26,7 @@ import {
   sendTemplateMessage,
   sendMediaMessage,
   type MediaKind,
-} from '@/lib/whatsapp/meta-api';
+} from '@/lib/whatsapp/evolution-api';
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import {
@@ -79,7 +79,7 @@ export interface SendMessageParams {
 export interface SendMessageResult {
   /** Our `messages.id` (the persisted row). */
   messageId: string;
-  /** Meta's `wamid` for the delivered message. */
+  /** Evolution/Baileys `key.id` for the delivered message. */
   whatsappMessageId: string;
 }
 
@@ -234,25 +234,24 @@ export async function sendMessageToConversation(
     );
   }
 
-  const accessToken = decrypt(config.access_token);
+  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+    throw new SendMessageError('whatsapp_not_configured', 'Evolution API is not configured for this account.', 400);
+  }
+  const apiKey = decrypt(config.evolution_api_key);
+  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey };
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
-  if (isLegacyFormat(config.access_token)) {
+  if (isLegacyFormat(config.evolution_api_key)) {
     void db
       .from('whatsapp_config')
-      .update({ access_token: encrypt(accessToken) })
+      .update({ evolution_api_key: encrypt(apiKey) })
       .eq('id', config.id)
       .then(({ error }: { error: { message: string } | null }) => {
-        if (error) {
-          console.warn(
-            '[send-message] access_token GCM upgrade failed:',
-            error.message
-          );
-        }
+        if (error) console.warn('[send-message] evolution_api_key GCM upgrade failed:', error.message);
       });
   }
 
-  // Resolve the reply target to its Meta message_id. The parent must
+  // Resolve the reply target to its WhatsApp transport message_id. The parent must
   // belong to this same conversation — otherwise a caller could quote
   // messages they can't see by guessing UUIDs.
   let contextMessageId: string | undefined;
@@ -273,7 +272,7 @@ export async function sendMessageToConversation(
     }
     if (!parent.message_id) {
       console.warn(
-        '[send-message] reply target has no Meta message_id; sending without context'
+        '[send-message] reply target has no WhatsApp transport message_id; sending without context'
       );
     } else {
       contextMessageId = parent.message_id;
@@ -294,7 +293,7 @@ export async function sendMessageToConversation(
     if (data && !isMessageTemplate(data)) {
       throw new SendMessageError(
         'template_malformed',
-        'Template row is malformed locally — run "Sync from Meta" in Settings to repair it.',
+        'Template row is malformed locally — run "review the local preset" in Settings to repair it.',
         500
       );
     }
@@ -304,8 +303,7 @@ export async function sendMessageToConversation(
   const attempt = async (phone: string): Promise<string> => {
     if (messageType === 'template') {
       const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        ...transport,
         to: phone,
         templateName: templateName!,
         language: templateLanguage || 'en_US',
@@ -318,8 +316,7 @@ export async function sendMessageToConversation(
     }
     if (isMediaKind) {
       const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        ...transport,
         to: phone,
         kind: messageType as MediaKind,
         link: mediaUrl!,
@@ -330,8 +327,7 @@ export async function sendMessageToConversation(
       return result.messageId;
     }
     const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      ...transport,
       to: phone,
       text: contentText!,
       contextMessageId,
@@ -339,8 +335,8 @@ export async function sendMessageToConversation(
     return result.messageId;
   };
 
-  // Send via Meta — retry across phone-number variants if Meta rejects
-  // with "recipient not in allowed list"; persist a working variant
+  // Send via Evolution — retry across phone-number variants if the gateway rejects
+  // an invalid/inexistent WhatsApp number; persist a working variant
   // back to the contact so the next send goes straight through.
   let waMessageId = '';
   let workingPhone = sanitizedPhone;
@@ -361,7 +357,7 @@ export async function sendMessageToConversation(
         }
         lastError = err;
         console.warn(
-          `[send-message] variant "${variant}" rejected by Meta, trying next…`
+          `[send-message] variant "${variant}" rejected by Evolution, trying next…`
         );
       }
     }
@@ -369,9 +365,9 @@ export async function sendMessageToConversation(
     if (lastError) throw lastError;
   } catch (err) {
     const message =
-      err instanceof Error ? err.message : 'Unknown Meta API error';
-    console.error('[send-message] Meta send failed for all variants:', message);
-    throw new SendMessageError('meta_error', `Meta API error: ${message}`, 502);
+      err instanceof Error ? err.message : 'Unknown Evolution API error';
+    console.error('[send-message] Evolution send failed for all variants:', message);
+    throw new SendMessageError('evolution_error', `Evolution API error: ${message}`, 502);
   }
 
   if (workingPhone !== sanitizedPhone) {
@@ -406,7 +402,7 @@ export async function sendMessageToConversation(
     console.error('[send-message] error inserting sent message:', msgError);
     throw new SendMessageError(
       'db_error',
-      `Message sent to Meta but failed to save to DB: ${msgError.message}`,
+      `Message sent to Evolution but failed to save to DB: ${msgError.message}`,
       500
     );
   }

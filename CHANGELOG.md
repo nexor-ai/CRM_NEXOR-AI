@@ -611,3 +611,11 @@ whether you applied a previous one.
 Initial template release. Core CRM: inbox, contacts, pipelines,
 broadcasts, automations (with a Wait-step cron drain), WhatsApp
 Cloud API integration, Supabase auth + RLS.
+
+
+## Evolution API transport migration
+
+- Replaced Meta Cloud API runtime transport with Evolution API instance/QR flow.
+- Added `031_evolution_api_transport.sql`.
+- Converted Meta templates into local message presets.
+- Added `WHATSAPP_WEBHOOK_TOKEN`, optional `EVOLUTION_API_URL` and `EVOLUTION_API_KEY`.

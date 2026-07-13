@@ -1,5 +1,5 @@
 /**
- * Build the Meta `components` array used by POST /{phone_number_id}/messages
+ * Build local template parameters used by Evolution text/media fallback sends
  * when sending an APPROVED template.
  *
  * Distinct from `template-components.ts` — that module builds the

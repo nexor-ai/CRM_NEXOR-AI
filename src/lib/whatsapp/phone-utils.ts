@@ -1,6 +1,6 @@
 /**
- * Sanitize phone number for Meta WhatsApp API.
- * Meta requires digits only — no + prefix, no spaces, no dashes.
+ * Sanitize phone number for Evolution WhatsApp API.
+ * Evolution requires digits only — no + prefix, no spaces, no dashes.
  * e.g. "+370 63949836" → "37063949836"
  */
 export function sanitizePhoneForMeta(phone: string): string {
@@ -41,8 +41,8 @@ export function isValidE164(phone: string): boolean {
 }
 
 /**
- * Generate plausible phone number variants for retry when Meta's
- * sandbox rejects a number with error #131030 ("not in allowed list").
+ * Generate plausible phone number variants for retry when Evolution reports
+ * a number as invalid/inexistent on WhatsApp.
  *
  * Many countries use a "trunk prefix" 0 for domestic dialing that is
  * meant to be dropped in international format (e.g. Lithuanian
@@ -95,10 +95,9 @@ export function phoneVariants(sanitized: string): string[] {
 }
 
 /**
- * Returns true when the Meta API error indicates the recipient
- * phone number isn't in the allowed list (sandbox restriction).
- * Detected via error code 131030 or the standard error text.
+ * Returns true when Evolution indicates the recipient phone number is invalid
+ * or not registered on WhatsApp. Keeps Meta code 131030 for legacy test compatibility.
  */
 export function isRecipientNotAllowedError(message: string): boolean {
-  return /131030|not in allowed list|not in the allowed list/i.test(message)
+  return /131030|not in allowed list|not in the allowed list|invalid.*number|number.*invalid|(?:number|recipient|user|phone).*not exist|not.*whatsapp|not.*registered/i.test(message)
 }

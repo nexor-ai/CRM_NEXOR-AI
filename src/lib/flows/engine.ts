@@ -16,14 +16,14 @@
  *   - Pure decision logic (which button matched, where to advance to,
  *     when to fallback) — here.
  *   - DB shape (table reads/writes) — here.
- *   - Meta API calls — `meta-send.ts` (engineSendInteractive*).
+ *   - Evolution API calls — `meta-send.ts` (engineSendInteractive*).
  *   - Policy resolution (reprompt vs handoff vs end) — `fallback.ts`.
  *   - Type definitions — `types.ts`.
  *
  * Concurrency model:
  *   - Idempotency on `meta_message_id`: the runner refuses to advance
- *     an active run twice for the same Meta message — protects against
- *     Meta's retries.
+ *     an active run twice for the same Evolution/Baileys message —
+ *     protects against webhook retries.
  *   - Optimistic UPDATE with `current_node_key` precondition: two
  *     simultaneous taps for the same run collide at the DB layer; the
  *     second is a no-op.
@@ -60,7 +60,7 @@ import {
 
 // ============================================================
 // Pure helpers — extracted so engine.test.ts can exercise them
-// without a Supabase / Meta mock.
+// without a Supabase / Evolution mock.
 // ============================================================
 
 /**
@@ -273,10 +273,10 @@ async function logEvent(
 }
 
 /**
- * Idempotency check — has a `reply_received` event with this Meta
- * message_id already been recorded for any of the contact's flow
- * runs? If yes, the inbound is a duplicate (Meta retry) and we
- * exit without re-advancing.
+ * Idempotency check — has a `reply_received` event with this
+ * Evolution/Baileys message_id already been recorded for any of the
+ * contact's flow runs? If yes, the inbound is a duplicate (webhook
+ * retry) and we exit without re-advancing.
  *
  * Implementation note: scoped to runs belonging to this user/contact
  * so the lookup is cheap (the index on flow_run_events(flow_run_id,

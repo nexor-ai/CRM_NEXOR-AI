@@ -70,7 +70,7 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
       <div>
         <h2 className="text-lg font-semibold text-foreground">Choose a Template</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Select an approved message template for your broadcast.
+          Select a WhatsApp preset for your broadcast.
         </p>
       </div>
 

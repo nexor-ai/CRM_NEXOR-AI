@@ -624,19 +624,43 @@ async function evaluateCondition(cfg: ConditionStepConfig, args: ExecuteArgs): P
       return text.toLowerCase().includes((cfg.value ?? '').toLowerCase())
     }
     case 'time_of_day': {
-      // operand form "HH:mm-HH:mm" — true if now is within that window
-      // (supports over-midnight ranges like "18:00-09:00").
-      const [from, to] = (cfg.operand ?? '').split('-')
-      if (!from || !to) return false
+      const operand = (cfg.operand ?? '').trim()
+      if (!operand) return false
       const now = new Date()
       const mins = now.getHours() * 60 + now.getMinutes()
       const parse = (s: string) => {
         const [h, m] = s.split(':').map(Number)
         return (h || 0) * 60 + (m || 0)
       }
-      const f = parse(from)
-      const t = parse(to)
-      return f <= t ? mins >= f && mins < t : mins >= f || mins < t
+      const within = (from: number, to: number) =>
+        from <= to ? mins >= from && mins < to : mins >= from || mins < to
+
+      // Weekly schedule: "mon:08:00-20:00,tue:08:00-20:00,...,sun:closed"
+      // Each entry is the day's OPEN window; true (fires) when the current
+      // moment falls outside it, or the day is marked closed.
+      if (/(^|,)\s*(sun|mon|tue|wed|thu|fri|sat)\s*:/i.test(operand)) {
+        const dayKey = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][now.getDay()]
+        const entry = operand
+          .split(',')
+          .map((part) => part.trim())
+          .find((part) => part.toLowerCase().startsWith(`${dayKey}:`))
+        if (!entry) return true // day not listed — treat as closed
+        const value = entry.slice(dayKey.length + 1).trim()
+        if (value.toLowerCase() === 'closed') return true
+        const [from, to] = value.split('-')
+        if (!from || !to) return true
+        return !within(parse(from), parse(to))
+      }
+
+      // Legacy simple window "HH:mm-HH:mm" — true if now is within that
+      // window (supports over-midnight ranges like "18:00-09:00").
+      // This window represents the OFF-hours range directly (unlike the
+      // weekly form above, whose windows are OPEN hours) — kept as-is for
+      // backward compatibility with automations saved before the weekly
+      // schedule format existed.
+      const [from, to] = operand.split('-')
+      if (!from || !to) return false
+      return within(parse(from), parse(to))
     }
     default:
       return false

@@ -47,8 +47,9 @@ function makeSupabaseMock() {
             data: {
               id: 'cfg-1',
               account_id: 'acct-1',
-              phone_number_id: 'PNID-1',
-              access_token: 'enc-token',
+              evolution_base_url: 'https://evo.example',
+              evolution_instance: 'inst-1',
+              evolution_api_key: 'enc-token',
             },
             error: null,
           }
@@ -146,7 +147,7 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
 const { sendTemplateMessage } = vi.hoisted(() => ({
   sendTemplateMessage: vi.fn(async () => ({ messageId: 'wamid-1' })),
 }))
-vi.mock('@/lib/whatsapp/meta-api', () => ({
+vi.mock('@/lib/whatsapp/evolution-api', () => ({
   sendTemplateMessage,
   sendTextMessage: vi.fn(),
   sendMediaMessage: vi.fn(),
@@ -208,7 +209,7 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
       string,
       unknown
     >
-    // Meta wants the bare E.164 digits — sanitizePhoneForMeta strips the '+'.
+    // Evolution wants bare digits — sanitizePhoneForMeta strips the '+'.
     expect(args.to).toBe('15551234567')
     expect(args.templateName).toBe('order_update')
 

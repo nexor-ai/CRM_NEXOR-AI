@@ -5,11 +5,9 @@ import { toast } from 'sonner';
 import {
   Eye,
   EyeOff,
-  Copy,
   CheckCircle2,
   XCircle,
   Loader2,
-  ExternalLink,
   Zap,
   AlertTriangle,
   RotateCcw,
@@ -33,7 +31,21 @@ import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
 const MASKED_TOKEN = '••••••••••••••••';
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
-type ResetReason = 'token_corrupted' | 'meta_api_error' | null;
+type ResetReason = 'token_corrupted' | 'evolution_api_error' | null;
+
+// Evolution sometimes returns `qrcode.base64` as a bare base64 PNG payload
+// (no `data:` prefix) instead of a ready-to-use data URL. A real QR PNG's
+// base64 body uses the full base64 alphabet (+, /, =, mixed case) and runs
+// to thousands of characters, so that's what distinguishes it from the
+// short pairing-code string that can also appear in `code`/`pairingCode`.
+function toQrImageSrc(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (raw.startsWith('data:') || raw.startsWith('http')) return raw;
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(raw) && raw.length > 100) {
+    return `data:image/png;base64,${raw}`;
+  }
+  return raw;
+}
 
 export function WhatsAppConfig() {
   const supabase = createClient();
@@ -47,6 +59,7 @@ export function WhatsAppConfig() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [refreshingQr, setRefreshingQr] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [config, setConfig] = useState<WhatsAppConfigType | null>(null);
@@ -61,36 +74,22 @@ export function WhatsAppConfig() {
   // again and overwrites whatever the user typed but hadn't saved yet.
   const loadedAccountIdRef = useRef<string | null>(null);
 
-  const [phoneNumberId, setPhoneNumberId] = useState('');
-  const [wabaId, setWabaId] = useState('');
+  const [evolutionBaseUrl, setEvolutionBaseUrl] = useState('');
+  const [evolutionInstance, setEvolutionInstance] = useState('');
   const [accessToken, setAccessToken] = useState('');
-  const [verifyToken, setVerifyToken] = useState('');
-  const [pin, setPin] = useState('');
+  const [qrCode, setQrCode] = useState<string | null>(null);
   const [tokenEdited, setTokenEdited] = useState(false);
 
-  // True once /register has succeeded on Meta's side (timestamp set
-  // in the row). When false, the saved config is metadata-only and
-  // Meta will silently drop every inbound event — that's the
-  // multi-number bug that prompted this work.
-  const isRegistered = Boolean(config?.registered_at);
-  const lastRegistrationError = config?.last_registration_error ?? null;
-
+  const isRegistered = config?.connection_state === 'open';
   const [verifyingRegistration, setVerifyingRegistration] = useState(false);
   type RegistrationProbe = {
     live: boolean;
     checks: Record<string, boolean | null>;
     errors?: string[];
-    last_registration_error?: string | null;
-    registered_at?: string | null;
-    subscribed_apps_at?: string | null;
   };
   const [registrationProbe, setRegistrationProbe] =
     useState<RegistrationProbe | null>(null);
 
-  const webhookUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}/api/whatsapp/webhook`
-      : '';
 
   const fetchConfig = useCallback(async (acctId: string) => {
     setLoading(true);
@@ -113,25 +112,23 @@ export function WhatsAppConfig() {
 
       if (data) {
         setConfig(data);
-        setPhoneNumberId(data.phone_number_id || '');
-        setWabaId(data.waba_id || '');
+        setEvolutionBaseUrl(data.evolution_base_url || '');
+        setEvolutionInstance(data.evolution_instance || '');
         setAccessToken(MASKED_TOKEN);
-        setVerifyToken('');
-        setPin('');
+        setQrCode(null);
         setTokenEdited(false);
       } else {
         setConfig(null);
-        setPhoneNumberId('');
-        setWabaId('');
+        setEvolutionBaseUrl('http://127.0.0.1:8080');
+        setEvolutionInstance('');
         setAccessToken('');
-        setVerifyToken('');
-        setPin('');
+        setQrCode(null);
         setTokenEdited(false);
       }
       // Clear any stale probe result when reloading the row.
       setRegistrationProbe(null);
 
-      // Then verify health via the API (decrypts token + pings Meta)
+      // Then verify health via the API (decrypts token + qrCodegs Evolution)
       if (data) {
         try {
           const res = await fetch('/api/whatsapp/config', { method: 'GET' });
@@ -143,7 +140,7 @@ export function WhatsAppConfig() {
             setStatusMessage('');
           } else {
             setConnectionStatus('disconnected');
-            setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'meta_api_error' ? 'meta_api_error' : null);
+            setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'evolution_api_error' ? 'evolution_api_error' : null);
             setStatusMessage(payload.message || '');
           }
         } catch (err) {
@@ -181,42 +178,29 @@ export function WhatsAppConfig() {
   }, [authLoading, profileLoading, user?.id, accountId, fetchConfig]);
 
   async function handleSave() {
-    if (!phoneNumberId.trim()) {
-      toast.error('Phone Number ID is required');
+    if (!evolutionBaseUrl.trim()) {
+      toast.error('Evolution API Base URL is required');
       return;
     }
-    if (!config && (!accessToken.trim() || !tokenEdited)) {
-      toast.error('Access Token is required for initial setup');
+    if (!evolutionInstance.trim()) {
+      toast.error('Evolution instance name is required');
       return;
     }
 
     try {
       setSaving(true);
 
-      // Always POST through the API — it verifies with Meta and encrypts
-      // the access_token server-side with ENCRYPTION_KEY. Skipping this
+      // Always POST through the API — it verifies with Evolution and encrypts
+      // the access_token server-side with ENCRYPTION_KEY. SkipqrCodeg this
       // and writing direct to Supabase stores the token in plaintext,
       // which then fails decryption on every subsequent health check.
       const payload: Record<string, unknown> = {
-        phone_number_id: phoneNumberId.trim(),
-        waba_id: wabaId.trim() || null,
-        verify_token: verifyToken.trim() || null,
-        // Optional — only sent when the user filled it in. The server
-        // requires it on first save or when changing numbers; for a
-        // simple token rotation, leaving it blank skips re-register.
-        pin: pin.trim() || null,
+        evolution_base_url: evolutionBaseUrl.trim(),
+        evolution_instance: evolutionInstance.trim(),
       };
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
-        payload.access_token = accessToken.trim();
-      } else if (config) {
-        // Existing config — reuse stored encrypted token by decrypting on the
-        // server. But our POST handler requires an access_token to verify
-        // with Meta. If the user didn't change the token, we need to signal
-        // that. Simplest: require token re-entry if they're updating.
-        toast.error('Please re-enter the Access Token to save changes');
-        setSaving(false);
-        return;
+        payload.evolution_api_key = accessToken.trim();
       }
 
       const res = await fetch('/api/whatsapp/config', {
@@ -233,37 +217,30 @@ export function WhatsAppConfig() {
         return;
       }
 
-      // The route now returns a structured outcome:
-      //   * registered=true   → number is live, events will flow
-      //   * registered=false  → credentials saved but /register
-      //                         failed; UI shows the specific error
-      //                         and a retry path. registration_error
-      //                         is human-readable from Meta.
-      if (data.registered === false && data.registration_error) {
-        toast.error(
-          `Saved, but Meta couldn't register the number: ${data.registration_error}`,
-          { duration: 12000 },
-        );
-      } else if (data.registration_skipped) {
+      // Evolution uses QR/pairing-code connectivity. The route returns the
+      // current instance state and, when needed, a QR payload from
+      // GET /instance/connect/:instanceName.
+      if (data.registration_skipped) {
         // Credentials saved + verified, but /register was skipped
-        // because no PIN was supplied (e.g. a Meta test number).
-        // Don't claim the number is "Live" — point at the
-        // Registration status banner instead.
+        // Evolution pairs devices by QR/pairing code. If the instance is not
+        // open yet, keep the UI honest and show the QR payload instead of
+        // claiming the number is live.
         toast.success(
-          'Credentials saved and verified. Inbound registration was skipped (no PIN) — see Registration status below.',
+          'Credentials saved. Scan the QR/pairing payload below if the instance is not open yet.',
           { duration: 10000 },
         );
-        setPin('');
+        setQrCode(toQrImageSrc(data.qrcode?.base64 || data.qrcode?.code || null));
       } else {
         toast.success(
           data.phone_info?.verified_name
             ? `Live — ${data.phone_info.verified_name} can now receive events.`
-            : 'WhatsApp connected. Events will start flowing within a minute.',
+            : data.connection_state === 'open'
+              ? 'WhatsApp already connected. Events will start flowing within a minute.'
+              : 'Evolution instance saved. Scan the QR/pairing payload to finish connecting WhatsApp.',
         );
-        // Clear the PIN so subsequent saves don't accidentally
-        // re-register (which would void the active subscription if
-        // the PIN became stale).
-        setPin('');
+        // Preserve the QR/pairing payload returned by Evolution so the user
+        // can finish the connection from this screen.
+        setQrCode(toQrImageSrc(data.qrcode?.base64 || data.qrcode?.code || null));
       }
 
       if (accountId) await fetchConfig(accountId);
@@ -292,7 +269,7 @@ export function WhatsAppConfig() {
         );
       } else {
         setConnectionStatus('disconnected');
-        setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'meta_api_error' ? 'meta_api_error' : null);
+        setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'evolution_api_error' ? 'evolution_api_error' : null);
         setStatusMessage(payload.message || '');
         toast.error(payload.message || 'API connection failed');
       }
@@ -302,6 +279,27 @@ export function WhatsAppConfig() {
       toast.error('Connection test failed. Check network and try again.');
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function handleRefreshQr() {
+    try {
+      setRefreshingQr(true);
+      const res = await fetch('/api/whatsapp/config/qr', { method: 'POST' });
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to refresh QR code');
+        return;
+      }
+
+      setQrCode(toQrImageSrc(data.qrcode?.base64 || data.qrcode?.code || null));
+      toast.success('QR/pairing payload refreshed. Scan it before it expires.');
+    } catch (err) {
+      console.error('Refresh QR error:', err);
+      toast.error('Failed to refresh QR code');
+    } finally {
+      setRefreshingQr(false);
     }
   }
 
@@ -315,10 +313,10 @@ export function WhatsAppConfig() {
       const data = (await res.json()) as RegistrationProbe;
       setRegistrationProbe(data);
       if (data.live) {
-        toast.success('Number is fully wired — Meta is delivering events.');
+        toast.success('Number is fully wired — Evolution is delivering events.');
       } else {
         toast.error(
-          'Number is not fully registered. See the checks below for which step failed.',
+          'Evolution instance is not open yet. Save the configuration again to refresh the QR/pairing payload.',
           { duration: 8000 },
         );
       }
@@ -348,10 +346,10 @@ export function WhatsAppConfig() {
 
       toast.success('Configuration cleared. You can now re-enter your credentials.');
       setConfig(null);
-      setPhoneNumberId('');
-      setWabaId('');
+      setEvolutionBaseUrl('');
+      setEvolutionInstance('');
       setAccessToken('');
-      setVerifyToken('');
+      setQrCode(null);
       setTokenEdited(false);
       setConnectionStatus('disconnected');
       setResetReason(null);
@@ -364,20 +362,15 @@ export function WhatsAppConfig() {
     }
   }
 
-  function handleCopyWebhookUrl() {
-    navigator.clipboard.writeText(webhookUrl);
-    toast.success('Webhook URL copied to clipboard');
-  }
-
   if (loading) {
     return (
       <section className="animate-in fade-in-50 duration-200">
         <SettingsPanelHead
           title="WhatsApp connection"
-          description="Connect your Meta WhatsApp Business API. Credentials, webhook, and setup steps all live here."
+          description="Connect your Evolution WhatsApp Business API. Credentials, webhook, and setup steps all live here."
         />
         <div className="flex items-center justify-center py-12">
-          <Loader2 className="size-6 animate-spin text-primary" />
+          <Loader2 className="size-6 animate-sqrCode text-primary" />
         </div>
       </section>
     );
@@ -389,7 +382,7 @@ export function WhatsAppConfig() {
     <section className="animate-in fade-in-50 duration-200">
       <SettingsPanelHead
         title="WhatsApp connection"
-        description="Connect your Meta WhatsApp Business API. Credentials, webhook, and setup steps all live here."
+        description="Connect your Evolution WhatsApp Business API. Credentials, webhook, and setup steps all live here."
       />
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
@@ -414,7 +407,7 @@ export function WhatsAppConfig() {
                 >
                   {resetting ? (
                     <>
-                      <Loader2 className="size-4 animate-spin" />
+                      <Loader2 className="size-4 animate-sqrCode" />
                       Resetting...
                     </>
                   ) : (
@@ -438,22 +431,20 @@ export function WhatsAppConfig() {
               <XCircle className="size-4 text-red-500" />
             )}
             <AlertTitle className="text-foreground mb-0">
-              {connectionStatus === 'connected' ? 'Credentials valid' : 'Not Connected'}
+              {connectionStatus === 'connected' ? 'Instance connected' : 'Not connected'}
             </AlertTitle>
           </div>
           <AlertDescription className="text-muted-foreground">
             {connectionStatus === 'connected'
-              ? 'Your access token authenticates with Meta. See Registration status below for whether webhooks are actually wired.'
+              ? 'Evolution reports this WhatsApp instance as open. Webhook events are configured per instance.'
               : statusMessage ||
-                'Configure your Meta API credentials below to connect your WhatsApp Business account.'}
+                'Configure your Evolution API credentials below to connect your WhatsApp Business account.'}
           </AlertDescription>
         </Alert>
 
-        {/* Registration Status — the "is it actually live?" check.
-            Credentials being valid is necessary but not sufficient;
-            without a successful /register call the number won't
-            receive inbound events. Surface this dimension separately
-            so users don't trust a misleading green banner. */}
+        {/* Evolution connection status — credentials being valid is necessary
+            but not sufficient; the instance must be `open` after QR pairing
+            before inbound/outbound WhatsApp traffic is reliable. */}
         {config && (
           <Alert
             className={
@@ -475,8 +466,8 @@ export function WhatsAppConfig() {
                   }
                 >
                   {isRegistered
-                    ? 'Registered — Meta will deliver events to wacrm'
-                    : 'Not registered — Meta will not deliver events'}
+                    ? 'Instance open — Evolution will deliver events to WACRM'
+                    : 'Instance not open — scan QR/pairing payload'}
                 </AlertTitle>
               </div>
               <Button
@@ -487,38 +478,21 @@ export function WhatsAppConfig() {
                 className="border-border bg-transparent text-foreground hover:bg-muted h-7"
               >
                 {verifyingRegistration ? (
-                  <Loader2 className="size-3.5 animate-spin" />
+                  <Loader2 className="size-3.5 animate-sqrCode" />
                 ) : (
                   <Zap className="size-3.5" />
                 )}
-                Verify with Meta
+                Check QR connection
               </Button>
             </div>
             <AlertDescription className="text-muted-foreground mt-2 text-xs leading-relaxed">
               {isRegistered ? (
                 <>
-                  Subscribed since{' '}
-                  {config.registered_at
-                    ? new Date(config.registered_at).toLocaleString()
-                    : 'unknown'}
-                  . Click <strong>Verify with Meta</strong> if events
-                  stop arriving.
-                </>
-              ) : lastRegistrationError ? (
-                <>
-                  Last attempt failed with:{' '}
-                  <span className="text-red-300">
-                    &quot;{lastRegistrationError}&quot;
-                  </span>
-                  . Enter (or correct) the 2-step PIN below and click
-                  Save Configuration to retry.
+                  Evolution connection state is <strong>open</strong>. Click <strong>Check QR connection</strong> if the connection state changes or events stop arriving.
                 </>
               ) : (
                 <>
-                  This number was saved before registration tracking
-                  existed, or registration was skipped. Enter the
-                  2-step PIN below and click Save Configuration to
-                  subscribe it.
+                  Evolution uses QR pairing instead of Meta registration/PIN. Click Save Configuration to create/connect the instance and display the QR payload.
                 </>
               )}
             </AlertDescription>
@@ -562,36 +536,36 @@ export function WhatsAppConfig() {
           <CardHeader>
             <CardTitle className="text-foreground">API Credentials</CardTitle>
             <CardDescription className="text-muted-foreground">
-              Enter your Meta WhatsApp Business API credentials.
+              Enter the Evolution API base URL, instance name, and apikey header. On this VPS the default server-side values are already configured.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Phone Number ID</Label>
+              <Label className="text-muted-foreground">Evolution instance name</Label>
               <Input
-                placeholder="e.g. 100234567890123"
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
+                placeholder="e.g. my_company_whatsapp"
+                value={evolutionInstance}
+                onChange={(e) => setEvolutionInstance(e.target.value)}
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
               />
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">WhatsApp Business Account ID</Label>
+              <Label className="text-muted-foreground">Evolution API base URL</Label>
               <Input
-                placeholder="e.g. 100234567890456"
-                value={wabaId}
-                onChange={(e) => setWabaId(e.target.value)}
+                placeholder="http://127.0.0.1:8080"
+                value={evolutionBaseUrl}
+                onChange={(e) => setEvolutionBaseUrl(e.target.value)}
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
               />
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Permanent Access Token</Label>
+              <Label className="text-muted-foreground">Evolution API key / apikey header</Label>
               <div className="relative">
                 <Input
                   type={showToken ? 'text' : 'password'}
-                  placeholder="Enter your access token"
+                  placeholder="Leave blank to use the server default, or paste a specific apikey"
                   value={accessToken}
                   onChange={(e) => {
                     setAccessToken(e.target.value);
@@ -615,171 +589,51 @@ export function WhatsAppConfig() {
               </div>
               {config && !tokenEdited && (
                 <p className="text-xs text-muted-foreground">
-                  Token is hidden for security. Re-enter it to update configuration.
+                  API key is hidden for security. Leave it unchanged to keep the stored key, or paste a new one to rotate it.
                 </p>
               )}
             </div>
 
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">Webhook Verify Token</Label>
-              <Input
-                placeholder="Create a custom verify token"
-                value={verifyToken}
-                onChange={(e) => setVerifyToken(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-              <p className="text-xs text-muted-foreground">
-                A custom string you create. Must match the token you set in Meta webhook settings.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">
-                Two-step verification PIN
-                <span className="ml-1 text-muted-foreground">(optional)</span>
-              </Label>
-              <Input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder="6-digit PIN from Meta WhatsApp Manager"
-                value={pin}
-                onChange={(e) =>
-                  setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
-                }
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest"
-              />
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                Needed only to wire <strong className="text-muted-foreground">inbound</strong> messages
-                for a <strong className="text-muted-foreground">production</strong> number. Set it in{' '}
-                <strong className="text-muted-foreground">
-                  Meta Business Manager → WhatsApp Accounts → Phone
-                  Numbers → Two-step verification
-                </strong>
-                , then paste it here so wacrm can subscribe the number —
-                otherwise Meta routes inbound events to whichever app
-                last claimed it (the symptom that hits second numbers
-                under a shared WABA).{' '}
-                <strong className="text-muted-foreground">Meta test numbers</strong> have no
-                PIN and are pre-registered — leave this blank for them.
-                Leaving it blank also keeps an existing registration
-                untouched.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Webhook URL */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground">Webhook Configuration</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              Use this URL as your webhook callback in the Meta App Dashboard.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">Webhook Callback URL</Label>
-              <div className="flex gap-2">
-                <Input
-                  readOnly
-                  value={webhookUrl}
-                  className="bg-muted border-border text-muted-foreground font-mono text-sm"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={handleCopyWebhookUrl}
-                  className="shrink-0 border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-                >
-                  <Copy className="size-4" />
-                </Button>
+            {qrCode && (
+              <div className="rounded-lg border border-border bg-muted p-4 text-sm text-muted-foreground">
+                <p className="font-medium text-foreground mb-2">QR Code / pairing payload</p>
+                {qrCode.startsWith('data:') || qrCode.startsWith('http') ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={qrCode} alt="Evolution WhatsApp QR Code" className="max-w-64 rounded bg-white p-2" />
+                ) : (
+                  <pre className="whitespace-pre-wrap break-all text-xs">{qrCode}</pre>
+                )}
+                <p className="mt-2">Scan this QR with WhatsApp. The connection state should become open/connected.</p>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Action Buttons */}
-        <div className="flex flex-wrap gap-3">
-          <Button
-            onClick={handleSave}
-            disabled={saving}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              'Save Configuration'
             )}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={handleTestConnection}
-            disabled={testing || !config}
-            className="border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-          >
-            {testing ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Testing...
-              </>
-            ) : (
-              <>
-                <Zap className="size-4" />
-                Test API Connection
-              </>
-            )}
-          </Button>
-          {config && (
-            <Button
-              variant="outline"
-              onClick={handleReset}
-              disabled={resetting}
-              className="border-red-900 text-red-400 hover:text-red-300 hover:bg-red-950/40"
-            >
-              {resetting ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Resetting...
-                </>
-              ) : (
-                <>
-                  <RotateCcw className="size-4" />
-                  Reset Configuration
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
 
-      {/* Setup Instructions Sidebar */}
-      <div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground text-base">Setup Instructions</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              Follow these steps to connect your WhatsApp Business API.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+            {!isRegistered && config && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleRefreshQr}
+                disabled={refreshingQr}
+                className="border-border text-foreground hover:bg-muted"
+              >
+                {refreshingQr ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+                Refresh QR / pairing payload
+              </Button>
+            )}
+
             <Accordion>
               <AccordionItem className="border-border">
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
-                    Create a Meta App
+                    Confirm Evolution API server
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Go to <span className="text-primary">developers.facebook.com</span></li>
-                    <li>Click &quot;My Apps&quot; and then &quot;Create App&quot;</li>
-                    <li>Select &quot;Business&quot; as the app type</li>
-                    <li>Fill in app details and create</li>
+                    <li>Use the local Evolution API at <code className="text-foreground">http://127.0.0.1:8080</code> from the CRM server.</li>
+                    <li>The Tailscale manager/API is available at <code className="text-foreground">https://vps-contabo.tail23fa54.ts.net:8080</code>.</li>
+                    <li>Authentication uses the Evolution <code className="text-foreground">apikey</code> header, not Meta tokens.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -788,14 +642,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                    Add WhatsApp Product
+                    Choose or create an instance
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>In your app dashboard, click &quot;Add Product&quot;</li>
-                    <li>Find &quot;WhatsApp&quot; and click &quot;Set Up&quot;</li>
-                    <li>Follow the setup wizard to link your business</li>
+                    <li>Type a unique instance name for this account — each account/number needs its own, never reuse one that&apos;s already connected to a different account.</li>
+                    <li>Saving calls Evolution <code className="text-foreground">POST /instance/create</code> when needed.</li>
+                    <li>Then the CRM calls <code className="text-foreground">GET /instance/connect/:instanceName</code> to obtain QR/pairing data.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -804,15 +658,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
-                    Get API Credentials
+                    Save and scan QR
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Go to WhatsApp &gt; API Setup</li>
-                    <li>Copy your <strong className="text-foreground">Phone Number ID</strong></li>
-                    <li>Copy your <strong className="text-foreground">WhatsApp Business Account ID</strong></li>
-                    <li>Generate a <strong className="text-foreground">Permanent Access Token</strong> from Business Settings &gt; System Users</li>
+                    <li>Fill <strong className="text-foreground">Evolution API base URL</strong> and <strong className="text-foreground">instance name</strong>.</li>
+                    <li>Leave the API key blank to use the server default, or paste a specific Evolution key.</li>
+                    <li>Click Save Configuration and scan the QR/pairing payload with WhatsApp if the state is not already open.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -821,32 +674,41 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">4</span>
-                    Configure Webhooks
+                    Webhook is configured automatically
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Go to WhatsApp &gt; Configuration</li>
-                    <li>Click &quot;Edit&quot; on the Webhook section</li>
-                    <li>Paste the <strong className="text-foreground">Webhook Callback URL</strong> from above</li>
-                    <li>Enter the same <strong className="text-foreground">Verify Token</strong> you set here</li>
-                    <li>Subscribe to &quot;messages&quot; webhook field</li>
+                    <li>On save, the CRM calls Evolution <code className="text-foreground">/webhook/set/:instanceName</code>.</li>
+                    <li>The callback is <strong className="text-foreground">/api/whatsapp/webhook</strong> protected with the CRM webhook token.</li>
+                    <li>Events include QR code, connection update, message upsert/update, send message and contacts.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
             </Accordion>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleTestConnection}
+            disabled={testing || !config}
+            className="border-border text-foreground hover:bg-muted"
+          >
+            {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+            Test Connection
+          </Button>
+          <Button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="bg-primary hover:bg-primary/90"
+          >
+            {saving ? <Loader2 className="size-4 animate-spin" /> : null}
+            Save Configuration
+          </Button>
+        </div>
 
-            <div className="mt-4 pt-4 border-t border-border">
-              <a
-                href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-sm text-primary hover:text-primary/80 transition-colors"
-              >
-                <ExternalLink className="size-3.5" />
-                Meta WhatsApp API Documentation
-              </a>
-            </div>
+
           </CardContent>
         </Card>
       </div>

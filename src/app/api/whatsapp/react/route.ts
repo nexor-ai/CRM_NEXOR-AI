@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
+import { sendReactionMessage } from '@/lib/whatsapp/evolution-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
 import {
@@ -14,7 +14,7 @@ import {
  *
  * Body: { message_id: <internal UUID>, emoji: <single emoji or "" to remove> }
  *
- * Sends the reaction to Meta and mirrors it into `message_reactions`
+ * Sends the reaction through Evolution and mirrors it into `message_reactions`
  * (delete on empty emoji). Customer-side reactions are handled by the
  * webhook — this route only writes `actor_type = 'agent'` rows.
  */
@@ -76,8 +76,8 @@ export async function POST(request: Request) {
     }
 
     if (!targetMessage.message_id) {
-      // No Meta ID yet — usually a sending/failed agent message. We can't
-      // tell Meta to react to a message it never received.
+      // No WhatsApp transport ID yet — usually a sending/failed agent message. We can't
+      // tell Evolution to react to a message it never received.
       return NextResponse.json(
         { error: 'Cannot react to a message that has not been sent to WhatsApp' },
         { status: 400 },
@@ -108,10 +108,10 @@ export async function POST(request: Request) {
       );
     }
 
-    // WhatsApp config + access token. Account-scoped post-multi-user.
+    // WhatsApp config + Evolution API key. Account-scoped post-multi-user.
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
-      .select('phone_number_id, access_token')
+      .select('evolution_base_url, evolution_instance, evolution_api_key')
       .eq('account_id', accountId)
       .single();
 
@@ -122,23 +122,27 @@ export async function POST(request: Request) {
       );
     }
 
-    const accessToken = decrypt(config.access_token);
+    if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
+      return NextResponse.json({ error: 'Evolution API is not configured.' }, { status: 400 });
+    }
+    const apiKey = decrypt(config.evolution_api_key);
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
 
     try {
       await sendReactionMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        baseUrl: config.evolution_base_url,
+        instance: config.evolution_instance,
+        apiKey,
         to: sanitizedPhone,
         targetMessageId: targetMessage.message_id,
         emoji,
       });
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : 'Unknown Meta API error';
-      console.error('[whatsapp/react] Meta send failed:', message);
+        err instanceof Error ? err.message : 'Unknown Evolution API error';
+      console.error('[whatsapp/react] Evolution send failed:', message);
       return NextResponse.json(
-        { error: `Meta API error: ${message}` },
+        { error: `Evolution API error: ${message}` },
         { status: 502 },
       );
     }
@@ -155,7 +159,7 @@ export async function POST(request: Request) {
       if (delError) {
         console.error('[whatsapp/react] DB delete failed:', delError.message);
         return NextResponse.json(
-          { error: 'Reaction sent to Meta but DB delete failed' },
+          { error: 'Reaction sent to Evolution but DB delete failed' },
           { status: 500 },
         );
       }
@@ -176,7 +180,7 @@ export async function POST(request: Request) {
       if (upsertError) {
         console.error('[whatsapp/react] DB upsert failed:', upsertError.message);
         return NextResponse.json(
-          { error: 'Reaction sent to Meta but DB upsert failed' },
+          { error: 'Reaction sent to Evolution but DB upsert failed' },
           { status: 500 },
         );
       }

@@ -181,7 +181,7 @@ export default function BroadcastsPage() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Broadcasts</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Send bulk messages to your contacts using approved templates.
+            Send bulk messages to your contacts using WhatsApp presets.
           </p>
         </div>
         <GatedButton
