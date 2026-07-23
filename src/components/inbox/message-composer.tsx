@@ -11,6 +11,7 @@ import {
   Send,
   LayoutTemplate,
   Paperclip,
+  MapPinned,
   Image as ImageIcon,
   Video,
   FileText,
@@ -96,6 +97,7 @@ interface MessageComposerProps {
   onSend: (text: string, replyToId?: string) => void;
   onSendMedia: (payload: SendMediaPayload) => void;
   onOpenTemplates: () => void;
+  onOpenRich: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
 }
@@ -116,6 +118,7 @@ export function MessageComposer({
   onSend,
   onSendMedia,
   onOpenTemplates,
+  onOpenRich,
   replyTo,
   onClearReply,
 }: MessageComposerProps) {
@@ -237,7 +240,7 @@ export function MessageComposer({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (data.code === "ai_not_configured") {
-          toast.error("AI isn't set up yet — enable it in Settings → AI Assistant.");
+          toast.error("A IA ainda não está configurada — ative em Configurações → Assistente de IA.");
         } else {
           toast.error(data.error ?? "Couldn't draft a reply.");
         }
@@ -245,7 +248,7 @@ export function MessageComposer({
       }
       const draftText = typeof data.draft === "string" ? data.draft.trim() : "";
       if (!draftText) {
-        toast.error("The assistant didn't return a reply.");
+        toast.error("O assistente não retornou uma resposta.");
         return;
       }
       setText(draftText);
@@ -260,7 +263,7 @@ export function MessageComposer({
         }
       });
     } catch {
-      toast.error("Couldn't reach the AI assistant.");
+      toast.error("Não foi possível contatar o assistente de IA.");
     } finally {
       setDrafting(false);
     }
@@ -316,7 +319,7 @@ export function MessageComposer({
       });
       if (file.size === 0) return; // cancelled / empty take
       if (file.size > MEDIA_MAX_BYTES_BY_KIND.audio) {
-        toast.error("Recording is too long (over 16 MB).");
+        toast.error("A gravação é muito longa (acima de 16 MB).");
         return;
       }
       setBusy(true);
@@ -336,7 +339,7 @@ export function MessageComposer({
   const startRecording = useCallback(async () => {
     if (inputsDisabled || busy || recording) return;
     if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") {
-      toast.error("Voice recording isn't supported in this browser.");
+      toast.error("A gravação de voz não é suportada neste navegador.");
       return;
     }
     try {
@@ -363,7 +366,7 @@ export function MessageComposer({
     } catch {
       void recorderRef.current?.stop().catch(() => {});
       recorderRef.current = null;
-      toast.error("Microphone access denied or unavailable.");
+      toast.error("Acesso ao microfone negado ou indisponível.");
     }
   }, [inputsDisabled, busy, recording, finalizeRecording]);
 
@@ -491,7 +494,7 @@ export function MessageComposer({
             size="sm"
             onClick={stopRecording}
             className="h-9 w-9 shrink-0 bg-primary p-0 hover:bg-primary/90"
-            title="Stop and attach"
+            title="Parar e anexar"
           >
             <Square className="h-4 w-4" />
           </Button>
@@ -504,7 +507,7 @@ export function MessageComposer({
               disabled={inputsDisabled || busy}
               title={
                 readOnly
-                  ? "Read-only — your role can't send messages"
+                  ? "Somente leitura — seu papel não pode enviar mensagens"
                   : inputsDisabled
                     ? undefined
                     : "Attach media"
@@ -534,6 +537,10 @@ export function MessageComposer({
                 <Mic className="mr-2 h-4 w-4" />
                 Voice note
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={onOpenRich}>
+                <MapPinned className="mr-2 h-4 w-4" />
+                Location, contact, sticker or poll
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -541,8 +548,8 @@ export function MessageComposer({
             variant="ghost"
             size="sm"
             canAct={!readOnly}
-            gateReason="send messages"
-            title={readOnly ? undefined : "Send template"}
+            gateReason="enviar mensagens"
+            title={readOnly ? undefined : "Enviar modelo"}
             className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
             onClick={onOpenTemplates}
           >
@@ -553,9 +560,9 @@ export function MessageComposer({
             variant="ghost"
             size="sm"
             canAct={!readOnly}
-            gateReason="send messages"
+            gateReason="enviar mensagens"
             disabled={drafting}
-            title={readOnly ? undefined : "Draft a reply with AI"}
+            title={readOnly ? undefined : "Rascunhar resposta com IA"}
             className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-primary"
             onClick={handleDraft}
           >
@@ -573,15 +580,15 @@ export function MessageComposer({
             onKeyDown={handleKeyDown}
             placeholder={
               readOnly
-                ? "Read-only — viewers can browse but not reply"
-                : "Type a message... (Shift+Enter for new line)"
+                ? "Somente leitura — visualizadores podem navegar, mas não responder"
+                : "Digite uma mensagem... (Shift+Enter para nova linha)"
             }
             disabled={readOnly}
             rows={1}
             // Textarea keeps its own inline title — the GatedButton
             // wrapping pattern doesn't apply to non-button inputs.
             // The placeholder text also surfaces the read-only state.
-            title={readOnly ? "Read-only — your role can't send messages" : undefined}
+            title={readOnly ? "Somente leitura — seu papel não pode enviar mensagens" : undefined}
             className={cn(
               "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
               readOnly && "cursor-not-allowed opacity-50"
@@ -591,7 +598,7 @@ export function MessageComposer({
           <GatedButton
             size="sm"
             canAct={!readOnly}
-            gateReason="send messages"
+            gateReason="enviar mensagens"
             disabled={!text.trim() || sending}
             onClick={handleSend}
             className="h-9 w-9 shrink-0 bg-primary p-0 hover:bg-primary/90 disabled:opacity-40"
@@ -662,7 +669,7 @@ function MediaDraftPreview({
         <button
           type="button"
           onClick={onDiscard}
-          aria-label="Remove attachment"
+          aria-label="Remover anexo"
           className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <X className="h-4 w-4" />
@@ -681,14 +688,14 @@ function MediaDraftPreview({
                 onSend();
               }
             }}
-            placeholder="Add a caption…"
+            placeholder="Adicionar uma legenda…"
             className="flex-1 rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50"
           />
         )}
         <GatedButton
           size="sm"
           canAct={!readOnly}
-          gateReason="send messages"
+          gateReason="enviar mensagens"
           disabled={busy}
           onClick={onSend}
           className={cn(

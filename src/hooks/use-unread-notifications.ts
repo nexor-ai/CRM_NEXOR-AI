@@ -1,63 +1,49 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
-import type { Notification } from "@/types";
+import { useCallback, useEffect, useState } from 'react';
+import { createClient } from '@/lib/supabase/client';
 
-/**
- * Count of unread notifications for the current user. Used by the
- * sidebar to surface a badge on the Notifications nav entry.
- *
- * RLS on `notifications` already scopes every read to `auth.uid() =
- * user_id`, so no explicit filter is needed here — same pattern as
- * `useTotalUnread` for conversations.
- */
+/** Recalculates from the contextual feed after every realtime event.
+ * This is deliberately idempotent: duplicate events and reconnects cannot
+ * over-increment or under-decrement the sidebar badge. */
 export function useUnreadNotifications(): number {
   const [count, setCount] = useState(0);
 
-  useEffect(() => {
+  const refresh = useCallback(async () => {
     const supabase = createClient();
-    let cancelled = false;
+    const { data, error } = await supabase.rpc('list_current_notifications', {
+      p_limit: 200,
+    });
+    if (error) return;
+    setCount(
+      (data ?? []).filter(
+        (item: { is_read?: boolean; read_at?: string | null }) =>
+          !(item.is_read ?? Boolean(item.read_at))
+      ).length
+    );
+  }, []);
 
-    (async () => {
-      // head:true skips fetching rows — we only need the `count`
-      // supabase-js returns alongside the (empty) response body.
-      const { count: unreadCount, error } = await supabase
-        .from("notifications")
-        .select("*", { count: "exact", head: true })
-        .is("read_at", null);
-      if (cancelled || error) return;
-      setCount(unreadCount ?? 0);
-    })();
-
+  useEffect(() => {
+    const initial = window.setTimeout(() => void refresh(), 0);
+    const supabase = createClient();
     const channel = supabase
-      .channel("notifications-unread-count")
+      .channel('notifications-unread-contextual')
       .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "notifications" },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const row = payload.new as Notification;
-            if (!row.read_at) setCount((n) => n + 1);
-          } else if (payload.eventType === "UPDATE") {
-            // Updates here only ever set read_at (marking a notification
-            // read). Derive purely from the new row so we don't rely on
-            // payload.old columns, which require REPLICA IDENTITY FULL.
-            const newRow = payload.new as Notification;
-            if (newRow.read_at) setCount((n) => Math.max(0, n - 1));
-          } else if (payload.eventType === "DELETE") {
-            const oldRow = payload.old as Partial<Notification>;
-            if (!oldRow.read_at) setCount((n) => Math.max(0, n - 1));
-          }
-        },
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notifications' },
+        () => void refresh()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notification_reads' },
+        () => void refresh()
       )
       .subscribe();
-
     return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
+      window.clearTimeout(initial);
+      void supabase.removeChannel(channel);
     };
-  }, []);
+  }, [refresh]);
 
   return count;
 }

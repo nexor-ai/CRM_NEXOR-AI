@@ -25,6 +25,12 @@ import {
   RefreshCw,
   PanelRightOpen,
   PanelRightClose,
+  MoreHorizontal,
+  Archive,
+  ArchiveRestore,
+  Mail,
+  BadgeCheck,
+  UserRoundSearch,
 } from "lucide-react";
 import { format, isToday, isYesterday } from "date-fns";
 import {
@@ -44,8 +50,19 @@ import {
 } from "./message-composer";
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
+import { RichMessageDialog, type RichMessagePayload } from "./rich-message-dialog";
 import { buildReplyPreview } from "./reply-quote";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface ReplyDraft {
   id: string;
@@ -72,6 +89,8 @@ interface MessageThreadProps {
     conversationId: string,
     assignedAgentId: string | null,
   ) => void;
+  onConversationPatch: (conversationId: string, updates: Partial<Conversation>) => void;
+  onContactPatch: (contact: Contact) => void;
   /**
    * On mobile, the thread is shown full-screen with the conversation list
    * hidden. This callback lets the page deselect the active conversation
@@ -157,6 +176,8 @@ export function MessageThread({
   onUpdateMessage,
   onStatusChange,
   onAssignChange,
+  onConversationPatch,
+  onContactPatch,
   onBack,
   resyncToken = 0,
   onRefresh,
@@ -167,7 +188,9 @@ export function MessageThread({
   const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const suppressNextAutoReadRef = useRef(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [richModalOpen, setRichModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
   // Purely visual spin state for the manual-refresh button. The actual
@@ -193,6 +216,9 @@ export function MessageThread({
     }, 700);
   }, [isRefreshing, onRefresh]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
+  const [messageAction, setMessageAction] = useState<{ mode: "edit" | "delete"; message: Message } | null>(null);
+  const [editText, setEditText] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
 
   // Profiles are bounded by RLS to rows the current user is allowed to
   // see — today that's just the current user, but the dropdown keeps the
@@ -378,26 +404,28 @@ export function MessageThread({
   // a quote pulled from conversation A shouldn't bleed into conversation B.
   useEffect(() => {
     setReplyTo(null);
+    suppressNextAutoReadRef.current = false;
   }, [conversationId]);
 
-  // Reset the server-side unread_count to 0 whenever an unread count
-  // surfaces on the active conversation — covers both (a) opening a
-  // conversation that had unread messages and (b) new messages arriving
-  // while the user is already viewing the thread (webhook server-bumps
-  // unread_count to N+1; the realtime UPDATE propagates it into the
-  // client, which re-runs this effect and flips it back to 0).
-  //
-  // Guarding on hasUnread prevents the eq-update loop: once unread_count
-  // is 0 the condition is false, so no further UPDATE is issued.
+  // Keep the CRM unread counter and WhatsApp read receipts synchronized.
+  // The server route resolves the conversation's stamped Evolution instance,
+  // marks inbound transport messages as read, then clears unread_count.
   useEffect(() => {
     if (!conversationId || !hasUnread) return;
-    const supabase = createClient();
-    supabase
-      .from("conversations")
-      .update({ unread_count: 0 })
-      .eq("id", conversationId)
-      .then(({ error }) => {
-        if (error) console.error("Failed to reset unread_count:", error);
+    if (suppressNextAutoReadRef.current) {
+      suppressNextAutoReadRef.current = false;
+      return;
+    }
+    void fetch(`/api/whatsapp/conversations/${conversationId}/read`, {
+      method: "POST",
+    })
+      .then(async (response) => {
+        if (response.ok) return;
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      })
+      .catch((error) => {
+        console.error("Failed to mark conversation as read:", error);
       });
   }, [conversationId, hasUnread]);
 
@@ -446,7 +474,7 @@ export function MessageThread({
         if (!res.ok) {
           const reason = payload?.error || `HTTP ${res.status}`;
           console.error("Failed to send message:", reason);
-          toast.error(`Failed to send: ${reason}`);
+          toast.error(`Falha ao enviar: ${reason}`);
           // Mark the optimistic bubble as failed so the user sees what happened
           onUpdateMessage(tempId, { status: "failed" });
           return;
@@ -459,7 +487,7 @@ export function MessageThread({
       } catch (err) {
         console.error("Failed to send message:", err);
         const reason = err instanceof Error ? err.message : "network error";
-        toast.error(`Failed to send: ${reason}`);
+        toast.error(`Falha ao enviar: ${reason}`);
         onUpdateMessage(tempId, { status: "failed" });
       }
     },
@@ -512,7 +540,7 @@ export function MessageThread({
         if (!res.ok) {
           const reason = data?.error || `HTTP ${res.status}`;
           console.error("Failed to send media:", reason);
-          toast.error(`Failed to send: ${reason}`);
+          toast.error(`Falha ao enviar: ${reason}`);
           onUpdateMessage(tempId, { status: "failed" });
           // The upload never reached the recipient — GC the orphaned
           // object rather than leaving it in the public bucket forever.
@@ -524,7 +552,7 @@ export function MessageThread({
       } catch (err) {
         console.error("Failed to send media:", err);
         const reason = err instanceof Error ? err.message : "network error";
-        toast.error(`Failed to send: ${reason}`);
+        toast.error(`Falha ao enviar: ${reason}`);
         onUpdateMessage(tempId, { status: "failed" });
         void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
       }
@@ -550,6 +578,28 @@ export function MessageThread({
   const handleOpenTemplates = useCallback(() => {
     setTemplateModalOpen(true);
   }, []);
+
+  const handleSendRich = useCallback(async (payload: RichMessagePayload) => {
+    if (!conversation) return;
+    const response = await fetch("/api/whatsapp/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: conversation.id, ...payload }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = body?.error || `HTTP ${response.status}`;
+      toast.error(message);
+      throw new Error(message);
+    }
+    const { data } = await createClient()
+      .from("messages")
+      .select("*")
+      .eq("id", body.message_id)
+      .single();
+    if (data) onNewMessage(data as Message);
+    toast.success("Mensagem enviada");
+  }, [conversation, onNewMessage]);
 
   const handleSendTemplate = useCallback(
     async (
@@ -605,7 +655,7 @@ export function MessageThread({
         if (!res.ok) {
           const reason = payload?.error || `HTTP ${res.status}`;
           console.error("Failed to send template:", reason);
-          toast.error(`Failed to send template: ${reason}`);
+          toast.error(`Falha ao enviar o modelo: ${reason}`);
           onUpdateMessage(tempId, { status: "failed" });
           return;
         }
@@ -614,7 +664,7 @@ export function MessageThread({
       } catch (err) {
         console.error("Failed to send template:", err);
         const reason = err instanceof Error ? err.message : "network error";
-        toast.error(`Failed to send template: ${reason}`);
+        toast.error(`Falha ao enviar o modelo: ${reason}`);
         onUpdateMessage(tempId, { status: "failed" });
       }
     },
@@ -675,7 +725,7 @@ export function MessageThread({
         return;
       }
       if (messageId.startsWith("temp-")) {
-        toast.error("Wait for the message to finish sending");
+        toast.error("Aguarde a mensagem terminar de enviar");
         return;
       }
 
@@ -721,7 +771,7 @@ export function MessageThread({
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : "network error";
-        toast.error(`Reaction failed: ${reason}`);
+        toast.error(`Falha na reação: ${reason}`);
         setReactions(snapshot);
       }
     },
@@ -740,7 +790,7 @@ export function MessageThread({
 
       if (error) {
         console.error("Failed to update assignment:", error);
-        toast.error("Failed to update assignment");
+        toast.error("Falha ao atualizar a atribuição");
         return;
       }
 
@@ -748,6 +798,58 @@ export function MessageThread({
     },
     [conversation, onAssignChange],
   );
+
+  const runConversationAction = useCallback(async (action: "archive" | "unarchive" | "mark_unread" | "refresh_profile" | "validate_number") => {
+    if (!conversation || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const response = await fetch(`/api/whatsapp/conversations/${conversation.id}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+      if (action === "archive" || action === "unarchive") {
+        onConversationPatch(conversation.id, { archived_at: payload.archived_at ?? undefined });
+      } else if (action === "mark_unread") {
+        suppressNextAutoReadRef.current = true;
+        onConversationPatch(conversation.id, { unread_count: payload.unread_count ?? 1 });
+      } else if (action === "refresh_profile" && payload.contact) {
+        onContactPatch(payload.contact as Contact);
+      }
+      toast.success(
+        action === "validate_number"
+          ? payload.validation?.exists ? "Número confirmado no WhatsApp" : "Número não encontrado no WhatsApp"
+          : "Ação concluída",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Falha na ação");
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, conversation, onContactPatch, onConversationPatch]);
+
+  const submitMessageAction = useCallback(async () => {
+    if (!messageAction || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const response = await fetch(`/api/whatsapp/messages/${messageAction.message.id}`, {
+        method: messageAction.mode === "edit" ? "PATCH" : "DELETE",
+        headers: messageAction.mode === "edit" ? { "Content-Type": "application/json" } : undefined,
+        body: messageAction.mode === "edit" ? JSON.stringify({ text: editText }) : undefined,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+      onUpdateMessage(messageAction.message.id, payload.message);
+      setMessageAction(null);
+      toast.success(messageAction.mode === "edit" ? "Mensagem editada" : "Mensagem apagada");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Falha ao alterar mensagem");
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, editText, messageAction, onUpdateMessage]);
 
   // Empty state — same WhatsApp-style doodle background as the active
   // thread below, so swapping between empty/selected doesn't change the
@@ -759,10 +861,10 @@ export function MessageThread({
           <MessageSquare className="h-8 w-8 text-muted-foreground" />
         </div>
         <h3 className="mt-4 text-sm font-medium text-muted-foreground">
-          Select a conversation
+          Selecione uma conversa
         </h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          Choose a conversation from the left to start messaging
+          Escolha uma conversa à esquerda para começar a conversar
         </p>
       </div>
     );
@@ -799,14 +901,18 @@ export function MessageThread({
             <button
               type="button"
               onClick={onBack}
-              aria-label="Back to conversations"
+              aria-label="Voltar para conversas"
               className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
             >
               <ArrowLeft className="h-5 w-5" />
             </button>
           )}
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground">
-            {displayName.charAt(0).toUpperCase()}
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-sm font-medium text-foreground">
+            {contact.avatar_url ? (
+              <img src={contact.avatar_url} alt={displayName} className="h-full w-full object-cover" />
+            ) : (
+              displayName.charAt(0).toUpperCase()
+            )}
           </div>
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-foreground">{displayName}</h2>
@@ -825,7 +931,7 @@ export function MessageThread({
               type="button"
               onClick={onToggleContactPanel}
               aria-label={
-                contactPanelOpen ? "Hide contact panel" : "Show contact panel"
+                contactPanelOpen ? "Ocultar painel do contato" : "Mostrar painel do contato"
               }
               aria-pressed={contactPanelOpen}
               title={contactPanelOpen ? "Hide contact" : "Show contact"}
@@ -852,8 +958,8 @@ export function MessageThread({
               type="button"
               onClick={handleRefreshClick}
               disabled={isRefreshing}
-              aria-label="Refresh conversation"
-              title="Refresh"
+              aria-label="Atualizar conversa"
+              title="Atualizar"
               className={cn(
                 "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60",
               )}
@@ -907,7 +1013,7 @@ export function MessageThread({
             >
               {profiles.length === 0 ? (
                 <DropdownMenuItem disabled className="text-sm text-muted-foreground">
-                  No teammates available
+                  Nenhum colega disponível
                 </DropdownMenuItem>
               ) : (
                 profiles.map((p) => {
@@ -953,6 +1059,32 @@ export function MessageThread({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              disabled={actionBusy}
+              aria-label="Ações da conversa"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="border-border bg-popover">
+              <DropdownMenuItem onClick={() => void runConversationAction(conversation.archived_at ? "unarchive" : "archive")}>
+                {conversation.archived_at ? <ArchiveRestore className="mr-2 h-4 w-4" /> : <Archive className="mr-2 h-4 w-4" />}
+                {conversation.archived_at ? "Desarquivar" : "Arquivar"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void runConversationAction("mark_unread")}>
+                <Mail className="mr-2 h-4 w-4" /> Marcar como não lida
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => void runConversationAction("validate_number")}>
+                <BadgeCheck className="mr-2 h-4 w-4" /> Validar número
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void runConversationAction("refresh_profile")}>
+                <UserRoundSearch className="mr-2 h-4 w-4" /> Atualizar perfil e avatar
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -964,9 +1096,9 @@ export function MessageThread({
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12">
-            <p className="text-sm text-muted-foreground">No messages yet</p>
+            <p className="text-sm text-muted-foreground">Nenhuma mensagem ainda</p>
             <p className="text-xs text-muted-foreground">
-              Send a template to start the conversation
+              Envie um modelo para iniciar a conversa
             </p>
           </div>
         ) : (
@@ -1011,6 +1143,11 @@ export function MessageThread({
                         onReact={(emoji) => {
                           if (emoji) void postReaction(msg.id, emoji);
                         }}
+                        onEdit={() => {
+                          setEditText(msg.content_text ?? "");
+                          setMessageAction({ mode: "edit", message: msg });
+                        }}
+                        onDelete={() => setMessageAction({ mode: "delete", message: msg })}
                       >
                         <MessageBubble
                           message={msg}
@@ -1035,6 +1172,7 @@ export function MessageThread({
         onSend={handleSend}
         onSendMedia={handleSendMedia}
         onOpenTemplates={handleOpenTemplates}
+        onOpenRich={() => setRichModalOpen(true)}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
       />
@@ -1044,6 +1182,38 @@ export function MessageThread({
         onOpenChange={setTemplateModalOpen}
         onSelect={handleSendTemplate}
       />
+
+      <RichMessageDialog
+        open={richModalOpen}
+        onOpenChange={setRichModalOpen}
+        onSend={handleSendRich}
+      />
+
+      <Dialog open={messageAction !== null} onOpenChange={(open) => !open && setMessageAction(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{messageAction?.mode === "edit" ? "Editar mensagem" : "Apagar mensagem"}</DialogTitle>
+            <DialogDescription>
+              {messageAction?.mode === "edit"
+                ? "A alteração será enviada ao WhatsApp e registrada no histórico local."
+                : "A mensagem será apagada para todos e preservada apenas na auditoria local."}
+            </DialogDescription>
+          </DialogHeader>
+          {messageAction?.mode === "edit" && (
+            <Input value={editText} onChange={(event) => setEditText(event.target.value)} maxLength={4096} autoFocus />
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMessageAction(null)} disabled={actionBusy}>Cancelar</Button>
+            <Button
+              variant={messageAction?.mode === "delete" ? "destructive" : "default"}
+              onClick={() => void submitMessageAction()}
+              disabled={actionBusy || (messageAction?.mode === "edit" && !editText.trim())}
+            >
+              {actionBusy ? "Processando…" : messageAction?.mode === "edit" ? "Salvar" : "Apagar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

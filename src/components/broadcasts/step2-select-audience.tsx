@@ -47,34 +47,34 @@ const audienceOptions: {
 }[] = [
   {
     type: 'all',
-    label: 'All Contacts',
-    description: 'Send to every contact in your database',
+    label: 'Todos os contatos',
+    description: 'Enviar para todos os contatos da sua base',
     icon: Users,
   },
   {
     type: 'tags',
-    label: 'Filter by Tags',
-    description: 'Target contacts with specific tags',
+    label: 'Filtrar por etiquetas',
+    description: 'Segmentar contatos com etiquetas específicas',
     icon: Tags,
   },
   {
     type: 'custom_field',
-    label: 'Custom Field',
-    description: 'Filter by a custom field value',
+    label: 'Campo personalizado',
+    description: 'Filtrar pelo valor de um campo personalizado',
     icon: Filter,
   },
   {
     type: 'csv',
-    label: 'Upload CSV',
-    description: 'Upload a list of phone numbers',
+    label: 'Enviar CSV',
+    description: 'Envie uma lista de números de telefone',
     icon: Upload,
   },
 ];
 
 const OPERATOR_OPTIONS: { value: CustomFieldOperator; label: string }[] = [
-  { value: 'is', label: 'is' },
-  { value: 'is_not', label: 'is not' },
-  { value: 'contains', label: 'contains' },
+  { value: 'is', label: 'é' },
+  { value: 'is_not', label: 'não é' },
+  { value: 'contains', label: 'contém' },
 ];
 
 // Accepts one phone per line, optionally `phone,name` (CSV) or `phone\tname`
@@ -287,9 +287,9 @@ export function Step2SelectAudience({
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-foreground">Select Audience</h2>
+        <h2 className="text-lg font-semibold text-foreground">Selecionar público</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Choose who will receive this broadcast.
+          Escolha quem vai receber este disparo.
         </p>
       </div>
 
@@ -343,12 +343,12 @@ export function Step2SelectAudience({
 
       {audience.type === 'tags' && (
         <div className="rounded-xl border border-border bg-card/50 p-4">
-          <p className="mb-3 text-sm font-medium text-foreground">Select Tags</p>
+          <p className="mb-3 text-sm font-medium text-foreground">Selecionar etiquetas</p>
           {loadingTags ? (
             <Loader2 className="h-5 w-5 animate-spin text-primary" />
           ) : tags.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No tags found. Create tags in Settings.
+              Nenhuma etiqueta encontrada. Crie etiquetas em Configurações.
             </p>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -379,12 +379,12 @@ export function Step2SelectAudience({
 
       {audience.type === 'custom_field' && (
         <div className="space-y-3 rounded-xl border border-border bg-card/50 p-4">
-          <p className="text-sm font-medium text-foreground">Custom Field Filter</p>
+          <p className="text-sm font-medium text-foreground">Filtro por campo personalizado</p>
           {loadingFields ? (
             <Loader2 className="h-5 w-5 animate-spin text-primary" />
           ) : customFields.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No custom fields defined. Create one in Settings → Custom Fields.
+              Nenhum campo personalizado definido. Crie um em Configurações → Campos personalizados.
             </p>
           ) : (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_140px_minmax(0,1fr)]">
@@ -393,7 +393,7 @@ export function Step2SelectAudience({
                 onChange={(e) => updateCustomField({ fieldId: e.target.value })}
                 className="h-9 rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
               >
-                <option value="">Select field…</option>
+                <option value="">Selecionar campo…</option>
                 {customFields.map((f) => (
                   <option key={f.id} value={f.id}>
                     {f.field_name}
@@ -419,7 +419,7 @@ export function Step2SelectAudience({
                 type="text"
                 value={audience.customField?.value ?? ''}
                 onChange={(e) => updateCustomField({ value: e.target.value })}
-                placeholder="Value"
+                placeholder="Valor"
                 className="h-9 rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary"
               />
             </div>
@@ -429,7 +429,7 @@ export function Step2SelectAudience({
 
       {audience.type === 'csv' && (
         <div className="space-y-3 rounded-xl border border-border bg-card/50 p-4">
-          <p className="text-sm font-medium text-foreground">Upload or paste phone numbers</p>
+          <p className="text-sm font-medium text-foreground">Envie ou cole números de telefone</p>
           <div className="flex items-center gap-2">
             <input
               ref={csvFileRef}
@@ -450,7 +450,7 @@ export function Step2SelectAudience({
               className="border-border text-foreground"
             >
               <Upload className="h-4 w-4" />
-              Upload CSV file
+              Enviar arquivo CSV
             </Button>
             {csvFileError && (
               <span className="text-xs text-red-400">{csvFileError}</span>
@@ -459,14 +459,14 @@ export function Step2SelectAudience({
           <textarea
             value={csvText}
             onChange={(e) => applyCsvText(e.target.value)}
-            placeholder={'One phone per line, e.g.\n+15551234567,Jane Doe\n+15557654321'}
+            placeholder={'Um telefone por linha, ex.:\n+5511987654321,Maria Silva\n+5511912345678'}
             rows={6}
             className="w-full rounded-lg border border-border bg-muted px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary"
           />
           <p className="text-xs text-muted-foreground">
             {(audience.csvContacts?.length ?? 0) > 0
-              ? `${audience.csvContacts?.length} valid phone number${audience.csvContacts?.length === 1 ? '' : 's'} parsed.`
-              : 'Paste numbers above or upload a .csv/.txt file — one per line, optionally followed by a name.'}
+              ? `${audience.csvContacts?.length} número${audience.csvContacts?.length === 1 ? '' : 's'} de telefone válido${audience.csvContacts?.length === 1 ? '' : 's'} processado${audience.csvContacts?.length === 1 ? '' : 's'}.`
+              : 'Cole os números acima ou envie um arquivo .csv/.txt — um por linha, opcionalmente seguido de um nome.'}
           </p>
         </div>
       )}
@@ -476,12 +476,12 @@ export function Step2SelectAudience({
         <div className="mb-3 flex items-center gap-2">
           <X className="h-4 w-4 text-red-400" />
           <p className="text-sm font-medium text-foreground">
-            Exclude contacts with these tags
+            Excluir contatos com estas etiquetas
           </p>
-          <span className="text-xs text-muted-foreground">(optional)</span>
+          <span className="text-xs text-muted-foreground">(opcional)</span>
         </div>
         {tags.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No tags available.</p>
+          <p className="text-xs text-muted-foreground">Nenhuma etiqueta disponível.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {tags.map((tag) => {
@@ -510,11 +510,11 @@ export function Step2SelectAudience({
 
       {/* Audience Summary */}
       <div className="rounded-xl border border-border bg-card/50 p-4">
-        <p className="mb-2 text-sm font-medium text-foreground">Audience Summary</p>
+        <p className="mb-2 text-sm font-medium text-foreground">Resumo do público</p>
         {loadingCount ? (
           <div className="flex items-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            <span className="text-xs text-muted-foreground">Calculating…</span>
+            <span className="text-xs text-muted-foreground">Calculando…</span>
           </div>
         ) : estimatedCount !== null ? (
           <div className="flex items-center gap-2">
@@ -522,11 +522,11 @@ export function Step2SelectAudience({
             <span className="text-sm text-foreground">
               {estimatedCount.toLocaleString()}
             </span>
-            <span className="text-xs text-muted-foreground">estimated recipients</span>
+            <span className="text-xs text-muted-foreground">destinatários estimados</span>
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            Select an audience type to see the estimate.
+            Selecione um tipo de público para ver a estimativa.
           </p>
         )}
       </div>
@@ -538,14 +538,14 @@ export function Step2SelectAudience({
           className="border-border text-muted-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back
+          Voltar
         </Button>
         <Button
           onClick={onNext}
           disabled={!isValid}
           className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          Next
+          Continuar
           <ArrowRight className="h-4 w-4" />
         </Button>
       </div>

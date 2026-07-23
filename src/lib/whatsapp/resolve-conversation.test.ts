@@ -39,6 +39,17 @@ function makeDb(script: Script): SupabaseClient {
       return builder;
     },
     eq: () => builder,
+    is: () => builder,
+    order: () => builder,
+    limit: () => {
+      if (table === 'whatsapp_config') {
+        return Promise.resolve({
+          data: script.config ? [script.config] : [],
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: [], error: null });
+    },
     like: () => {
       const data = script.contactCandidatesByCall
         ? (script.contactCandidatesByCall[likeCalls] ?? [])

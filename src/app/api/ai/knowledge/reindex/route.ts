@@ -26,7 +26,7 @@ export async function POST() {
     if (error) {
       console.error('[ai/knowledge/reindex] fetch error:', error)
       return NextResponse.json(
-        { error: 'Failed to load documents' },
+        { error: 'Não foi possível carregar os documentos' },
         { status: 500 },
       )
     }
@@ -65,7 +65,7 @@ export async function POST() {
             success: false,
             reindexed,
             total: (docs ?? []).length,
-            error: `Reindexed ${reindexed}, then hit an error: ${message}`,
+            error: `${reindexed} reindexado(s), então ocorreu um erro: ${message}`,
           },
           { status: 200 },
         )

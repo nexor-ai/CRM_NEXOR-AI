@@ -6,15 +6,19 @@ import {
   type InteractiveButton,
   type InteractiveListSection,
   type MediaKind,
-} from '@/lib/whatsapp/evolution-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
+} from '@/lib/whatsapp/evolution-api';
+import { decrypt } from '@/lib/whatsapp/encryption';
+import {
+  resolveActiveWhatsAppConfig,
+  whatsappTrace,
+} from '@/lib/whatsapp/resolve-config';
 import {
   sanitizePhoneForMeta,
   isValidE164,
   phoneVariants,
   isRecipientNotAllowedError,
-} from '@/lib/whatsapp/phone-utils'
-import { supabaseAdmin } from './admin-client'
+} from '@/lib/whatsapp/phone-utils';
+import { supabaseAdmin } from './admin-client';
 
 // ------------------------------------------------------------
 // Flows-side Evolution sender (interactive variants).
@@ -35,14 +39,14 @@ interface SendTextEngineArgs {
   /** Account-level tenancy key. Drives contact + whatsapp_config
    *  lookups so a flow authored by user A still sends through the
    *  WhatsApp number user B saved on the same account. */
-  accountId: string
+  accountId: string;
   /** Original author of the flow — used for INSERT audit columns
    *  and for resolving the agent's identity in logs. Not consulted
    *  for tenancy. */
-  userId: string
-  conversationId: string
-  contactId: string
-  text: string
+  userId: string;
+  conversationId: string;
+  contactId: string;
+  text: string;
 }
 
 /**
@@ -58,69 +62,77 @@ interface SendTextEngineArgs {
  * media sends) settle.
  */
 export async function engineSendText(
-  args: SendTextEngineArgs,
+  args: SendTextEngineArgs
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
+  const db = supabaseAdmin();
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
     .select('id, phone')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
-    .maybeSingle()
+    .maybeSingle();
   if (contactErr || !contact?.phone) {
-    throw new Error('contact not found for this account')
+    throw new Error('contact not found for this account');
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
+  const sanitized = sanitizePhoneForMeta(contact.phone);
   if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+    throw new Error(`contact phone invalid: ${contact.phone}`);
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', args.accountId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
+  const config = await resolveActiveWhatsAppConfig(db, args.accountId);
+  if (!config) {
+    throw new Error('WhatsApp not configured for this account');
   }
 
-  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-    throw new Error('Evolution API is not configured for this account')
+  if (
+    !config.evolution_base_url ||
+    !config.evolution_instance ||
+    !config.evolution_api_key
+  ) {
+    throw new Error('Evolution API is not configured for this account');
   }
-  const apiKey = decrypt(config.evolution_api_key)
-  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
+  const apiKey = decrypt(config.evolution_api_key);
+  const transport = {
+    baseUrl: config.evolution_base_url,
+    instance: config.evolution_instance,
+    apiKey,
+  };
+  const trace = whatsappTrace(config);
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendTextMessage({
       ...transport,
       to: phone,
       text: args.text,
-    })
-    return r.messageId
-  }
+    });
+    return r.messageId;
+  };
 
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
+  const variants = phoneVariants(sanitized);
+  let workingPhone = sanitized;
+  let waMessageId = '';
+  let lastError: unknown = null;
   for (const v of variants) {
     try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
+      waMessageId = await attempt(v);
+      workingPhone = v;
+      lastError = null;
+      break;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRecipientNotAllowedError(msg)) throw err;
+      lastError = err;
     }
   }
-  if (lastError) throw lastError
+  if (lastError) throw lastError;
 
   if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await db
+      .from('contacts')
+      .update({ phone: workingPhone })
+      .eq('id', contact.id);
   }
 
   const { error: msgErr } = await db.from('messages').insert({
@@ -130,9 +142,12 @@ export async function engineSendText(
     content_text: args.text,
     message_id: waMessageId,
     status: 'sent',
-  })
+    ...trace,
+  });
   if (msgErr) {
-    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
+    throw new Error(
+      `sent to Evolution but DB insert failed: ${msgErr.message}`
+    );
   }
 
   await db
@@ -141,23 +156,24 @@ export async function engineSendText(
       last_message_text: args.text,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ...trace,
     })
-    .eq('id', args.conversationId)
+    .eq('id', args.conversationId);
 
-  return { whatsapp_message_id: waMessageId }
+  return { whatsapp_message_id: waMessageId };
 }
 
 interface SendMediaEngineArgs {
-  accountId: string
-  userId: string
-  conversationId: string
-  contactId: string
-  kind: MediaKind
+  accountId: string;
+  userId: string;
+  conversationId: string;
+  contactId: string;
+  kind: MediaKind;
   /** Public URL Evolution fetches at send time. */
-  link: string
-  caption?: string
+  link: string;
+  caption?: string;
   /** Document-only; ignored by Evolution for image/video. */
-  filename?: string
+  filename?: string;
 }
 
 /**
@@ -170,39 +186,44 @@ interface SendMediaEngineArgs {
  * the media kind so the inbox renders the right preview.
  */
 export async function engineSendMedia(
-  args: SendMediaEngineArgs,
+  args: SendMediaEngineArgs
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
+  const db = supabaseAdmin();
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
     .select('id, phone')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
-    .maybeSingle()
+    .maybeSingle();
   if (contactErr || !contact?.phone) {
-    throw new Error('contact not found for this account')
+    throw new Error('contact not found for this account');
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
+  const sanitized = sanitizePhoneForMeta(contact.phone);
   if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+    throw new Error(`contact phone invalid: ${contact.phone}`);
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', args.accountId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
+  const config = await resolveActiveWhatsAppConfig(db, args.accountId);
+  if (!config) {
+    throw new Error('WhatsApp not configured for this account');
   }
 
-  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-    throw new Error('Evolution API is not configured for this account')
+  if (
+    !config.evolution_base_url ||
+    !config.evolution_instance ||
+    !config.evolution_api_key
+  ) {
+    throw new Error('Evolution API is not configured for this account');
   }
-  const apiKey = decrypt(config.evolution_api_key)
-  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
+  const apiKey = decrypt(config.evolution_api_key);
+  const transport = {
+    baseUrl: config.evolution_base_url,
+    instance: config.evolution_instance,
+    apiKey,
+  };
+  const trace = whatsappTrace(config);
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendMediaMessage({
@@ -212,37 +233,40 @@ export async function engineSendMedia(
       link: args.link,
       caption: args.caption,
       filename: args.filename,
-    })
-    return r.messageId
-  }
+    });
+    return r.messageId;
+  };
 
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
+  const variants = phoneVariants(sanitized);
+  let workingPhone = sanitized;
+  let waMessageId = '';
+  let lastError: unknown = null;
   for (const v of variants) {
     try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
+      waMessageId = await attempt(v);
+      workingPhone = v;
+      lastError = null;
+      break;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRecipientNotAllowedError(msg)) throw err;
+      lastError = err;
     }
   }
-  if (lastError) throw lastError
+  if (lastError) throw lastError;
 
   if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await db
+      .from('contacts')
+      .update({ phone: workingPhone })
+      .eq('id', contact.id);
   }
 
   // content_type='image'|'video'|'document' — these are already in the
   // messages_content_type_check constraint (migration 001 + 010).
   // content_text carries the caption (or empty) so the conversation
   // list preview shows something meaningful when the user glances at it.
-  const preview = args.caption?.trim() || `[${args.kind}]`
+  const preview = args.caption?.trim() || `[${args.kind}]`;
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: args.conversationId,
     sender_type: 'bot',
@@ -250,9 +274,12 @@ export async function engineSendMedia(
     content_text: args.caption ?? null,
     message_id: waMessageId,
     status: 'sent',
-  })
+    ...trace,
+  });
   if (msgErr) {
-    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
+    throw new Error(
+      `sent to Evolution but DB insert failed: ${msgErr.message}`
+    );
   }
 
   await db
@@ -261,33 +288,34 @@ export async function engineSendMedia(
       last_message_text: preview,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ...trace,
     })
-    .eq('id', args.conversationId)
+    .eq('id', args.conversationId);
 
-  return { whatsapp_message_id: waMessageId }
+  return { whatsapp_message_id: waMessageId };
 }
 
 interface SendInteractiveButtonsEngineArgs {
-  accountId: string
-  userId: string
-  conversationId: string
-  contactId: string
-  bodyText: string
-  buttons: InteractiveButton[]
-  headerText?: string
-  footerText?: string
+  accountId: string;
+  userId: string;
+  conversationId: string;
+  contactId: string;
+  bodyText: string;
+  buttons: InteractiveButton[];
+  headerText?: string;
+  footerText?: string;
 }
 
 interface SendInteractiveListEngineArgs {
-  accountId: string
-  userId: string
-  conversationId: string
-  contactId: string
-  bodyText: string
-  buttonLabel: string
-  sections: InteractiveListSection[]
-  headerText?: string
-  footerText?: string
+  accountId: string;
+  userId: string;
+  conversationId: string;
+  contactId: string;
+  bodyText: string;
+  buttonLabel: string;
+  sections: InteractiveListSection[];
+  headerText?: string;
+  footerText?: string;
 }
 
 /**
@@ -302,9 +330,9 @@ interface SendInteractiveListEngineArgs {
  * the `flow_runs.last_prompt_message_id` field for later reference.
  */
 export async function engineSendInteractiveButtons(
-  args: SendInteractiveButtonsEngineArgs,
+  args: SendInteractiveButtonsEngineArgs
 ): Promise<{ whatsapp_message_id: string }> {
-  return sendInteractiveViaEvolution({ ...args, kind: 'buttons' })
+  return sendInteractiveViaEvolution({ ...args, kind: 'buttons' });
 }
 
 /**
@@ -312,19 +340,19 @@ export async function engineSendInteractiveButtons(
  * Used when the flow needs more than 3 options (WhatsApp's button cap).
  */
 export async function engineSendInteractiveList(
-  args: SendInteractiveListEngineArgs,
+  args: SendInteractiveListEngineArgs
 ): Promise<{ whatsapp_message_id: string }> {
-  return sendInteractiveViaEvolution({ ...args, kind: 'list' })
+  return sendInteractiveViaEvolution({ ...args, kind: 'list' });
 }
 
 type SendInput =
   | (SendInteractiveButtonsEngineArgs & { kind: 'buttons' })
-  | (SendInteractiveListEngineArgs & { kind: 'list' })
+  | (SendInteractiveListEngineArgs & { kind: 'list' });
 
 async function sendInteractiveViaEvolution(
-  input: SendInput,
+  input: SendInput
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
+  const db = supabaseAdmin();
 
   // Scope the contact + whatsapp_config lookups by account_id —
   // same defense-in-depth rationale as automations/meta-send.ts.
@@ -334,30 +362,35 @@ async function sendInteractiveViaEvolution(
     .select('id, phone')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
-    .maybeSingle()
+    .maybeSingle();
   if (contactErr || !contact?.phone) {
-    throw new Error('contact not found for this account')
+    throw new Error('contact not found for this account');
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
+  const sanitized = sanitizePhoneForMeta(contact.phone);
   if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+    throw new Error(`contact phone invalid: ${contact.phone}`);
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', input.accountId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
+  const config = await resolveActiveWhatsAppConfig(db, input.accountId);
+  if (!config) {
+    throw new Error('WhatsApp not configured for this account');
   }
 
-  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-    throw new Error('Evolution API is not configured for this account')
+  if (
+    !config.evolution_base_url ||
+    !config.evolution_instance ||
+    !config.evolution_api_key
+  ) {
+    throw new Error('Evolution API is not configured for this account');
   }
-  const apiKey = decrypt(config.evolution_api_key)
-  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }
+  const apiKey = decrypt(config.evolution_api_key);
+  const transport = {
+    baseUrl: config.evolution_base_url,
+    instance: config.evolution_instance,
+    apiKey,
+  };
+  const trace = whatsappTrace(config);
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'buttons') {
@@ -368,8 +401,8 @@ async function sendInteractiveViaEvolution(
         buttons: input.buttons,
         headerText: input.headerText,
         footerText: input.footerText,
-      })
-      return r.messageId
+      });
+      return r.messageId;
     }
     const r = await sendInteractiveList({
       ...transport,
@@ -379,33 +412,36 @@ async function sendInteractiveViaEvolution(
       sections: input.sections,
       headerText: input.headerText,
       footerText: input.footerText,
-    })
-    return r.messageId
-  }
+    });
+    return r.messageId;
+  };
 
   // Same phone-variant retry as automations/meta-send.ts. Numbers
   // registered with/without a trunk 0 + WhatsApp number-format quirks
   // all need this to reliably land a message.
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
+  const variants = phoneVariants(sanitized);
+  let workingPhone = sanitized;
+  let waMessageId = '';
+  let lastError: unknown = null;
   for (const v of variants) {
     try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
+      waMessageId = await attempt(v);
+      workingPhone = v;
+      lastError = null;
+      break;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRecipientNotAllowedError(msg)) throw err;
+      lastError = err;
     }
   }
-  if (lastError) throw lastError
+  if (lastError) throw lastError;
 
   if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await db
+      .from('contacts')
+      .update({ phone: workingPhone })
+      .eq('id', contact.id);
   }
 
   // Persist the bot's prompt to the messages table so it appears in
@@ -424,9 +460,12 @@ async function sendInteractiveViaEvolution(
     content_text: input.bodyText,
     message_id: waMessageId,
     status: 'sent',
-  })
+    ...trace,
+  });
   if (msgErr) {
-    throw new Error(`sent to Evolution but DB insert failed: ${msgErr.message}`)
+    throw new Error(
+      `sent to Evolution but DB insert failed: ${msgErr.message}`
+    );
   }
 
   await db
@@ -435,8 +474,9 @@ async function sendInteractiveViaEvolution(
       last_message_text: input.bodyText,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ...trace,
     })
-    .eq('id', input.conversationId)
+    .eq('id', input.conversationId);
 
-  return { whatsapp_message_id: waMessageId }
+  return { whatsapp_message_id: waMessageId };
 }

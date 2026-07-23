@@ -18,7 +18,20 @@ ENV_PATH = Path(os.environ.get("NEXOR_ENV", PROJECT_DIR / ".env"))
 HOST = os.environ.get("WACRM_INTERNAL_HOST", "127.0.0.1")
 PORT = os.environ.get("PORT", "3010")
 INTERVAL_SECONDS = int(os.environ.get("WACRM_WORKER_INTERVAL_SECONDS", "60"))
-ENDPOINTS = ("/api/automations/cron", "/api/flows/cron")
+ENDPOINTS = (
+    "/api/internal/evolution/cron",
+    "/api/internal/evolution/reconcile",
+    "/api/automations/cron",
+    "/api/flows/cron",
+    "/api/broadcasts/cron",
+)
+ENDPOINT_TIMEOUTS = {
+    # Reconciliation fetches and normalizes a bounded page of Evolution
+    # messages serially. Thirty seconds can expire while the server is still
+    # making progress, causing the worker to report a false failure and start
+    # another reconciliation on the next cycle.
+    "/api/internal/evolution/reconcile": 120,
+}
 
 
 def parse_env_line(line: str) -> tuple[str, str] | None:
@@ -50,7 +63,7 @@ def hit(path: str, secret: str) -> None:
     url = f"http://{HOST}:{PORT}{path}"
     req = urllib.request.Request(url, headers={"x-cron-secret": secret})
     try:
-        with urllib.request.urlopen(req, timeout=30) as res:
+        with urllib.request.urlopen(req, timeout=ENDPOINT_TIMEOUTS.get(path, 30)) as res:
             body = res.read().decode("utf-8", errors="replace")[:500]
             print(f"[wacrm-worker] {path} {res.status} {body}", flush=True)
     except urllib.error.HTTPError as exc:

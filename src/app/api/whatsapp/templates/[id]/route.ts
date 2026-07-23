@@ -14,11 +14,11 @@ async function accountForCurrentUser() {
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params
-  if (!UUID_RE.test(id)) return NextResponse.json({ error: 'Invalid template id.' }, { status: 400 })
+  if (!UUID_RE.test(id)) return NextResponse.json({ error: 'ID de modelo inválido.' }, { status: 400 })
   const { supabase, accountId } = await accountForCurrentUser()
-  if (!accountId) return NextResponse.json({ error: 'Unauthorized or account missing.' }, { status: 401 })
+  if (!accountId) return NextResponse.json({ error: 'Não autorizado ou conta ausente.' }, { status: 401 })
   let payload: TemplatePayload
-  try { payload = (await request.json()) as TemplatePayload } catch { return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 }) }
+  try { payload = (await request.json()) as TemplatePayload } catch { return NextResponse.json({ error: 'Corpo JSON inválido.' }, { status: 400 }) }
   try { validateTemplatePayload(payload) } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : 'Validation failed.' }, { status: 400 }) }
   const { data: row, error } = await supabase.from('message_templates').update({
     category: payload.category,
@@ -42,9 +42,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
 export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params
-  if (!UUID_RE.test(id)) return NextResponse.json({ error: 'Invalid template id.' }, { status: 400 })
+  if (!UUID_RE.test(id)) return NextResponse.json({ error: 'ID de modelo inválido.' }, { status: 400 })
   const { supabase, accountId } = await accountForCurrentUser()
-  if (!accountId) return NextResponse.json({ error: 'Unauthorized or account missing.' }, { status: 401 })
+  if (!accountId) return NextResponse.json({ error: 'Não autorizado ou conta ausente.' }, { status: 401 })
   const { error } = await supabase.from('message_templates').delete().eq('id', id).eq('account_id', accountId)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   // EVOLUTION: local delete only; no remote template lifecycle exists.

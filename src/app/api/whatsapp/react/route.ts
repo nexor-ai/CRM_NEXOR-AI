@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { sendReactionMessage } from '@/lib/whatsapp/evolution-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
+import { resolveActiveWhatsAppConfig } from '@/lib/whatsapp/resolve-config';
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -28,7 +29,7 @@ export async function POST(request: Request) {
     } = await supabase.auth.getUser();
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
     }
 
     const limit = checkRateLimit(`react:${user.id}`, RATE_LIMITS.react);
@@ -46,7 +47,7 @@ export async function POST(request: Request) {
     const accountId = profile?.account_id as string | undefined;
     if (!accountId) {
       return NextResponse.json(
-        { error: 'Your profile is not linked to an account.' },
+        { error: 'Seu perfil não está vinculado a uma conta.' },
         { status: 403 },
       );
     }
@@ -67,33 +68,33 @@ export async function POST(request: Request) {
     // Resolve target message + its conversation; verify ownership.
     const { data: targetMessage, error: msgError } = await supabase
       .from('messages')
-      .select('id, message_id, conversation_id')
+      .select('id, message_id, conversation_id, sender_type')
       .eq('id', message_id)
       .maybeSingle();
 
     if (msgError || !targetMessage) {
-      return NextResponse.json({ error: 'Message not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Mensagem não encontrada' }, { status: 404 });
     }
 
     if (!targetMessage.message_id) {
       // No WhatsApp transport ID yet — usually a sending/failed agent message. We can't
       // tell Evolution to react to a message it never received.
       return NextResponse.json(
-        { error: 'Cannot react to a message that has not been sent to WhatsApp' },
+        { error: 'Não é possível reagir a uma mensagem que não foi enviada ao WhatsApp' },
         { status: 400 },
       );
     }
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, account_id, contact:contacts(phone)')
+      .select('id, account_id, whatsapp_config_id, contact:contacts(phone)')
       .eq('id', targetMessage.conversation_id)
       .eq('account_id', accountId)
       .maybeSingle();
 
     if (convError || !conversation) {
       return NextResponse.json(
-        { error: 'Conversation not found' },
+        { error: 'Conversa não encontrada' },
         { status: 404 },
       );
     }
@@ -103,27 +104,33 @@ export async function POST(request: Request) {
       : conversation.contact;
     if (!contact?.phone) {
       return NextResponse.json(
-        { error: 'Contact phone number not found' },
+        { error: 'Número de telefone do contato não encontrado' },
         { status: 400 },
       );
     }
 
-    // WhatsApp config + Evolution API key. Account-scoped post-multi-user.
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('evolution_base_url, evolution_instance, evolution_api_key')
-      .eq('account_id', accountId)
-      .single();
+    // Use the same Evolution instance that received this conversation.
+    // Legacy conversations without a stamp fall back deterministically to
+    // the account's active configuration.
+    let config;
+    try {
+      config = await resolveActiveWhatsAppConfig(supabase, accountId, {
+        preferConfigId: conversation.whatsapp_config_id ?? null,
+      });
+    } catch (error) {
+      console.error('[whatsapp/react] config resolution failed:', error);
+      config = null;
+    }
 
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
-        { error: 'WhatsApp not configured.' },
+        { error: 'WhatsApp não configurado.' },
         { status: 400 },
       );
     }
 
     if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-      return NextResponse.json({ error: 'Evolution API is not configured.' }, { status: 400 });
+      return NextResponse.json({ error: 'A API Evolution não está configurada.' }, { status: 400 });
     }
     const apiKey = decrypt(config.evolution_api_key);
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
@@ -136,13 +143,14 @@ export async function POST(request: Request) {
         to: sanitizedPhone,
         targetMessageId: targetMessage.message_id,
         emoji,
+        fromMe: targetMessage.sender_type !== 'customer',
       });
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Unknown Evolution API error';
       console.error('[whatsapp/react] Evolution send failed:', message);
       return NextResponse.json(
-        { error: `Evolution API error: ${message}` },
+        { error: `Erro da API Evolution: ${message}` },
         { status: 502 },
       );
     }
@@ -159,7 +167,7 @@ export async function POST(request: Request) {
       if (delError) {
         console.error('[whatsapp/react] DB delete failed:', delError.message);
         return NextResponse.json(
-          { error: 'Reaction sent to Evolution but DB delete failed' },
+          { error: 'Reação enviada à Evolution, mas a exclusão no banco falhou' },
           { status: 500 },
         );
       }
@@ -180,7 +188,7 @@ export async function POST(request: Request) {
       if (upsertError) {
         console.error('[whatsapp/react] DB upsert failed:', upsertError.message);
         return NextResponse.json(
-          { error: 'Reaction sent to Evolution but DB upsert failed' },
+          { error: 'Reação enviada à Evolution, mas a gravação no banco falhou' },
           { status: 500 },
         );
       }
@@ -190,7 +198,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error('Error in WhatsApp react POST:', error);
     return NextResponse.json(
-      { error: 'Failed to react to message' },
+      { error: 'Não foi possível reagir à mensagem' },
       { status: 500 },
     );
   }

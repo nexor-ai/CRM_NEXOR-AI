@@ -29,6 +29,8 @@ import {
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import { resolveActiveWhatsAppConfig } from '@/lib/whatsapp/resolve-config';
+import { normalizeBroadcastInterval } from '@/lib/broadcast-campaign';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -54,6 +56,9 @@ export interface CreateBroadcastParams {
   templateName: string;
   templateLanguage?: string | null;
   recipients: BroadcastRecipientInput[];
+  intervalMinutes?: number | null;
+  scheduledAt?: string | null;
+  messageVariations?: string[];
 }
 
 interface PlannedRecipient {
@@ -112,20 +117,24 @@ export async function createBroadcast(
 
   // Config (fail fast + provides the audit trail owner already resolved
   // by the caller). Evolution send needs base URL + instance + decrypted apikey.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
-  if (configError || !config) {
+  const config = await resolveActiveWhatsAppConfig(db, accountId);
+  if (!config) {
     throw new BroadcastError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
       400
     );
   }
-  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-    throw new BroadcastError('whatsapp_not_configured', 'Evolution API is not configured. Please connect an instance first.', 400);
+  if (
+    !config.evolution_base_url ||
+    !config.evolution_instance ||
+    !config.evolution_api_key
+  ) {
+    throw new BroadcastError(
+      'whatsapp_not_configured',
+      'Evolution API is not configured. Please connect an instance first.',
+      400
+    );
   }
   const apiKey = decrypt(config.evolution_api_key);
 
@@ -152,7 +161,9 @@ export async function createBroadcast(
   const resolved: { contactId: string; phone: string; params: string[] }[] = [];
   let rejected = 0;
   for (const r of recipients) {
-    const sanitized = sanitizePhoneForMeta(typeof r.to === 'string' ? r.to : '');
+    const sanitized = sanitizePhoneForMeta(
+      typeof r.to === 'string' ? r.to : ''
+    );
     if (!isValidE164(sanitized)) {
       rejected++;
       continue;
@@ -205,7 +216,14 @@ export async function createBroadcast(
       name: name || `API broadcast (${templateName})`,
       template_name: templateName,
       template_language: templateLanguage,
-      status: 'sending',
+      status: params.scheduledAt ? 'scheduled' : 'sending',
+      interval_minutes: normalizeBroadcastInterval(params.intervalMinutes),
+      scheduled_at: params.scheduledAt ?? new Date().toISOString(),
+      next_send_at: params.scheduledAt ?? new Date().toISOString(),
+      message_variations: (params.messageVariations ?? []).filter(
+        (value): value is string =>
+          typeof value === 'string' && value.trim().length > 0
+      ),
       total_recipients: deduped.length,
     })
     .select('id')
@@ -218,10 +236,12 @@ export async function createBroadcast(
   const { data: recipientRows, error: rErr } = await db
     .from('broadcast_recipients')
     .insert(
-      deduped.map((r) => ({
+      deduped.map((r, index) => ({
         broadcast_id: broadcast.id,
         contact_id: r.contactId,
         status: 'pending' as const,
+        send_params: r.params,
+        variation_index: index,
       }))
     )
     .select('id, contact_id');
@@ -235,7 +255,11 @@ export async function createBroadcast(
   const byContact = new Map(deduped.map((r) => [r.contactId, r]));
   const planned: PlannedRecipient[] = recipientRows.map((row) => {
     const r = byContact.get(row.contact_id as string)!;
-    return { recipientRowId: row.id as string, phone: r.phone, params: r.params };
+    return {
+      recipientRowId: row.id as string,
+      phone: r.phone,
+      params: r.params,
+    };
   });
 
   return {
@@ -291,7 +315,8 @@ export async function deliverBroadcast(
         lastError = null;
         break;
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
+        const message =
+          error instanceof Error ? error.message : 'Erro desconhecido';
         lastError = message;
         // Only a "recipient not allowed" error is worth another variant.
         if (!isRecipientNotAllowedError(message)) break;
@@ -306,6 +331,7 @@ export async function deliverBroadcast(
           status: 'sent',
           sent_at: new Date().toISOString(),
           whatsapp_message_id: sentMessageId,
+          whatsapp_instance: plan.evolutionInstance,
           error_message: null,
         })
         .eq('id', recipient.recipientRowId);
@@ -314,7 +340,7 @@ export async function deliverBroadcast(
         .from('broadcast_recipients')
         .update({
           status: 'failed',
-          error_message: lastError || 'Unknown error',
+          error_message: lastError || 'Erro desconhecido',
         })
         .eq('id', recipient.recipientRowId);
     }

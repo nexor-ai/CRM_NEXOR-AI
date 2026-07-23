@@ -1,4 +1,4 @@
-import type { AccountRole } from "@/lib/auth/roles";
+import type { AccountRole } from '@/lib/auth/roles';
 
 export interface Profile {
   id: string;
@@ -77,7 +77,7 @@ export interface AccountInvitation {
   id: string;
   account_id: string;
   /** Roles offered via invite — owner is never offered. */
-  role: Exclude<AccountRole, "owner">;
+  role: Exclude<AccountRole, 'owner'>;
   created_by_user_id: string | null;
   label: string | null;
   created_at: string;
@@ -98,6 +98,12 @@ export interface Contact {
   email?: string;
   company?: string;
   avatar_url?: string;
+  whatsapp_push_name?: string;
+  whatsapp_profile_status?: string;
+  whatsapp_profile_synced_at?: string;
+  whatsapp_number_exists?: boolean;
+  whatsapp_number_jid?: string;
+  whatsapp_number_validated_at?: string;
   created_at: string;
   updated_at: string;
   /** Hydrated by queries that embed `contact_tags(tags(*))` (e.g. the
@@ -156,6 +162,7 @@ export interface Conversation {
   last_message_text?: string;
   last_message_at?: string;
   unread_count: number;
+  archived_at?: string;
   created_at: string;
   updated_at: string;
   contact?: Contact;
@@ -165,7 +172,17 @@ export interface Conversation {
 // Notifications (migration 027)
 // ============================================================
 
-export type NotificationType = 'conversation_assigned';
+export type NotificationType = string;
+export type NotificationCategory =
+  | 'inbox'
+  | 'pipeline'
+  | 'broadcast'
+  | 'automation'
+  | 'flow'
+  | 'ai'
+  | 'integration'
+  | 'system';
+export type NotificationSeverity = 'info' | 'warning' | 'error' | 'critical';
 
 export interface Notification {
   id: string;
@@ -173,6 +190,16 @@ export interface Notification {
   /** Recipient — the agent this notification is for. */
   user_id: string;
   type: NotificationType;
+  event_key?: string;
+  category?: NotificationCategory;
+  severity?: NotificationSeverity;
+  target_url?: string;
+  entity_type?: string;
+  entity_id?: string;
+  metadata?: Record<string, unknown>;
+  occurrence_count?: number;
+  last_occurred_at?: string;
+  is_read?: boolean;
   conversation_id?: string;
   contact_id?: string;
   /** Who triggered it. Null when an automation/system assigned it. */
@@ -191,10 +218,14 @@ export type ContentType =
   | 'audio'
   | 'video'
   | 'location'
+  | 'contact'
+  | 'sticker'
+  | 'poll'
   | 'template'
   /** Customer tapped a reply button or list row on a message we sent. */
   | 'interactive';
-export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+export type MessageStatus =
+  'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 
 export interface Message {
   id: string;
@@ -216,6 +247,35 @@ export interface Message {
    * cue (renders with a "↩ button reply" affordance).
    */
   interactive_reply_id?: string;
+  content_data?: {
+    latitude?: number;
+    longitude?: number;
+    name?: string;
+    address?: string;
+    displayName?: string;
+    vcard?: string;
+    values?: string[];
+    selectableCount?: number;
+    contacts?: Array<{
+      fullName: string;
+      phoneNumber: string;
+      organization?: string;
+      email?: string;
+      url?: string;
+    }>;
+    native?: boolean;
+    buttons?: Array<{ id: string; title: string }>;
+    buttonLabel?: string;
+    sections?: Array<{
+      title?: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    }>;
+  };
+  original_content_text?: string;
+  edited_at?: string;
+  edited_by_user_id?: string;
+  deleted_at?: string;
+  deleted_by_user_id?: string;
 }
 
 export type ReactionActor = 'customer' | 'agent';
@@ -346,8 +406,24 @@ export interface Deal {
   assignee?: Profile;
 }
 
-export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'failed';
-export type RecipientStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'replied' | 'failed';
+export type BroadcastStatus =
+  | 'draft'
+  | 'scheduled'
+  | 'sending'
+  | 'paused'
+  | 'sent'
+  | 'failed'
+  | 'cancelled';
+export type RecipientStatus =
+  | 'pending'
+  | 'processing'
+  | 'sent'
+  | 'delivered'
+  | 'read'
+  | 'replied'
+  | 'failed'
+  | 'uncertain'
+  | 'cancelled';
 
 export interface Broadcast {
   id: string;
@@ -358,6 +434,15 @@ export interface Broadcast {
   template_variables?: Record<string, unknown>;
   audience_filter?: Record<string, unknown>;
   scheduled_at?: string;
+  interval_minutes?: number;
+  next_send_at?: string;
+  window_start?: string;
+  window_end?: string;
+  schedule_timezone?: string;
+  daily_limit?: number;
+  message_variations?: string[];
+  paused_at?: string;
+  completed_at?: string;
   status: BroadcastStatus;
   total_recipients: number;
   sent_count: number;
@@ -489,10 +574,7 @@ export interface WaitStepConfig {
 }
 
 export type ConditionSubject =
-  | 'contact_field'
-  | 'tag_presence'
-  | 'message_content'
-  | 'time_of_day';
+  'contact_field' | 'tag_presence' | 'message_content' | 'time_of_day';
 
 export interface ConditionStepConfig {
   subject: ConditionSubject;

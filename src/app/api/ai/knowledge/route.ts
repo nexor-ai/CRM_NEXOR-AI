@@ -25,7 +25,7 @@ export async function GET() {
     if (error) {
       console.error('[ai/knowledge GET] error:', error)
       return NextResponse.json(
-        { error: 'Failed to load knowledge base' },
+        { error: 'Não foi possível carregar a base de conhecimento' },
         { status: 500 },
       )
     }
@@ -65,7 +65,7 @@ export async function POST(request: Request) {
     if (error || !doc) {
       console.error('[ai/knowledge POST] insert error:', error)
       return NextResponse.json(
-        { error: 'Failed to save document' },
+        { error: 'Não foi possível salvar o documento' },
         { status: 500 },
       )
     }

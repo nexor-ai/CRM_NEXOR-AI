@@ -1,20 +1,23 @@
-import { supabaseAdmin } from './admin-client'
-import { loadAiConfig } from './config'
-import { buildConversationContext } from './context'
-import { retrieveKnowledge } from './knowledge'
-import { generateReply } from './generate'
-import { buildSystemPrompt } from './defaults'
-import { latestUserMessage } from './query'
-import { engineSendText } from '@/lib/flows/meta-send'
+import { supabaseAdmin } from './admin-client';
+import { loadAiConfig } from './config';
+import { buildConversationContext } from './context';
+import { retrieveKnowledge } from './knowledge';
+import { generateReply } from './generate';
+import { buildSystemPrompt } from './defaults';
+import { latestUserMessage } from './query';
+import { engineSendText } from '@/lib/flows/meta-send';
+import { notifyOperationalEvent } from '@/lib/notifications/producer';
+import { decrypt } from '@/lib/whatsapp/encryption';
+import { sendChatPresence, type EvolutionCredentials } from '@/lib/whatsapp/evolution-api';
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
-  accountId: string
-  conversationId: string
-  contactId: string
+  accountId: string;
+  conversationId: string;
+  contactId: string;
   /** The account's WhatsApp config owner, used for the outbound send's
    *  audit columns (mirrors how the flow runner passes it through). */
-  configOwnerUserId: string
+  configOwnerUserId: string;
 }
 
 /**
@@ -37,15 +40,15 @@ interface DispatchArgs {
  * window check is needed.
  */
 export async function dispatchInboundToAiReply(
-  args: DispatchArgs,
+  args: DispatchArgs
 ): Promise<void> {
-  const { accountId, conversationId, contactId, configOwnerUserId } = args
+  const { accountId, conversationId, contactId, configOwnerUserId } = args;
 
   try {
-    const db = supabaseAdmin()
+    const db = supabaseAdmin();
 
-    const config = await loadAiConfig(db, accountId)
-    if (!config || !config.autoReplyEnabled) return
+    const config = await loadAiConfig(db, accountId);
+    if (!config || !config.autoReplyEnabled) return;
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level
@@ -61,43 +64,53 @@ export async function dispatchInboundToAiReply(
       .eq('account_id', accountId)
       .eq('is_active', true)
       .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
-    if (autoResponders && autoResponders.length > 0) return
+      .limit(1);
+    if (autoResponders && autoResponders.length > 0) return;
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
       .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
       .eq('id', conversationId)
-      .maybeSingle()
-    if (convErr || !conv) return
-    if (conv.assigned_agent_id) return // a human owns this thread
-    if (conv.ai_autoreply_disabled) return // handed off / turned off here
+      .maybeSingle();
+    if (convErr || !conv) return;
+    if (conv.assigned_agent_id) return; // a human owns this thread
+    if (conv.ai_autoreply_disabled) return; // handed off / turned off here
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
-    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return
+    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return;
 
-    const messages = await buildConversationContext(db, conversationId)
-    if (messages.length === 0) return
+    const messages = await buildConversationContext(db, conversationId);
+    if (messages.length === 0) return;
 
     // Ground the reply in the account's knowledge base (best-effort).
     const knowledge = await retrieveKnowledge(
       db,
       accountId,
       config,
-      latestUserMessage(messages),
-    )
+      latestUserMessage(messages)
+    );
 
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
       mode: 'auto_reply',
       knowledge,
-    })
+    });
 
-    const { text, handoff } = await generateReply({
-      config,
-      systemPrompt,
-      messages,
-    })
+    const presence = await loadEvolutionPresenceContext(db, accountId, contactId);
+    if (presence) {
+      await sendChatPresence({ ...presence.credentials, to: presence.phone, presence: 'composing' })
+        .catch((error) => console.warn('[ai auto-reply] composing presence failed:', error));
+    }
+    let generated: Awaited<ReturnType<typeof generateReply>>;
+    try {
+      generated = await generateReply({ config, systemPrompt, messages });
+    } finally {
+      if (presence) {
+        await sendChatPresence({ ...presence.credentials, to: presence.phone, presence: 'paused' })
+          .catch((error) => console.warn('[ai auto-reply] paused presence failed:', error));
+      }
+    }
+    const { text, handoff } = generated;
 
     if (handoff || !text) {
       // The model can't (or shouldn't) answer — stop auto-replying on
@@ -105,9 +118,25 @@ export async function dispatchInboundToAiReply(
       // the inbox for a human. Sticky until an admin re-enables.
       await db
         .from('conversations')
-        .update({ ai_autoreply_disabled: true })
-        .eq('id', conversationId)
-      return
+        .update({
+          ai_autoreply_disabled: true,
+          status: 'pending',
+        })
+        .eq('id', conversationId);
+      await notifyOperationalEvent(db, {
+        accountId,
+        userId: configOwnerUserId,
+        eventKey: 'ai.handoff',
+        category: 'ai',
+        severity: 'warning',
+        title: 'Agente de IA solicitou atendimento humano',
+        body: 'A conversa foi movida para pendente e as respostas automáticas foram interrompidas.',
+        targetUrl: `/inbox?c=${conversationId}`,
+        entityType: 'conversation',
+        entityId: conversationId,
+        dedupeKey: `ai-handoff:${conversationId}`,
+      });
+      return;
     }
 
     // Atomically claim a reply slot: the cap check + increment happen in
@@ -120,9 +149,9 @@ export async function dispatchInboundToAiReply(
       {
         conversation_id: conversationId,
         max_replies: config.autoReplyMaxPerConversation,
-      },
-    )
-    if (claimErr || claimed !== true) return
+      }
+    );
+    if (claimErr || claimed !== true) return;
 
     await engineSendText({
       accountId,
@@ -130,8 +159,38 @@ export async function dispatchInboundToAiReply(
       conversationId,
       contactId,
       text,
-    })
+    });
   } catch (err) {
-    console.error('[ai auto-reply] dispatch failed:', err)
+    console.error('[ai auto-reply] dispatch failed:', err);
   }
+}
+
+async function loadEvolutionPresenceContext(
+  db: ReturnType<typeof supabaseAdmin>,
+  accountId: string,
+  contactId: string
+): Promise<{ credentials: EvolutionCredentials; phone: string } | null> {
+  const [{ data: configs }, { data: contact }] = await Promise.all([
+    db
+      .from('whatsapp_config')
+      .select('evolution_base_url, evolution_instance, evolution_api_key')
+      .eq('account_id', accountId)
+      .is('disabled_at', null)
+      .not('evolution_base_url', 'is', null)
+      .not('evolution_instance', 'is', null)
+      .not('evolution_api_key', 'is', null)
+      .limit(1),
+    db.from('contacts').select('phone').eq('id', contactId).eq('account_id', accountId).maybeSingle(),
+  ]);
+  const transport = configs?.[0];
+  if (!transport?.evolution_base_url || !transport.evolution_instance ||
+      !transport.evolution_api_key || !contact?.phone) return null;
+  return {
+    credentials: {
+      baseUrl: transport.evolution_base_url,
+      instance: transport.evolution_instance,
+      apiKey: decrypt(transport.evolution_api_key),
+    },
+    phone: contact.phone,
+  };
 }

@@ -1,179 +1,173 @@
-"use client";
+'use client';
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
-import { useAuth } from "@/hooks/use-auth";
-import type { Notification } from "@/types";
-import { Bell, CheckCheck, Loader2, UserPlus } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import { toast } from "sonner";
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
+import type {
+  Notification,
+  NotificationCategory,
+  NotificationSeverity,
+} from '@/types';
+import {
+  AlertTriangle,
+  Bell,
+  Bot,
+  CheckCheck,
+  GitBranch,
+  Inbox,
+  Loader2,
+  Radio,
+  Settings,
+  Workflow,
+} from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
-// Icon per notification type. Only one type exists today
-// (conversation_assigned) but this keeps future types a one-line add.
-const TYPE_ICON: Record<Notification["type"], typeof Bell> = {
-  conversation_assigned: UserPlus,
+const CATEGORY_ICON: Record<NotificationCategory, typeof Bell> = {
+  inbox: Inbox,
+  pipeline: GitBranch,
+  broadcast: Radio,
+  automation: Workflow,
+  flow: Workflow,
+  ai: Bot,
+  integration: Settings,
+  system: AlertTriangle,
+};
+const SEVERITY_CLASS: Record<NotificationSeverity, string> = {
+  info: 'border-primary/30 bg-primary/5',
+  warning: 'border-amber-500/30 bg-amber-500/5',
+  error: 'border-red-500/30 bg-red-500/5',
+  critical: 'border-red-600/60 bg-red-600/10',
 };
 
 export default function NotificationsPage() {
   const router = useRouter();
-  const { accountId } = useAuth();
-  const [notifications, setNotifications] = useState<Notification[] | null>(
-    null,
-  );
+  const [items, setItems] = useState<Notification[] | null>(null);
+  const [category, setCategory] = useState<'all' | NotificationCategory>('all');
+  const [onlyUnread, setOnlyUnread] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
 
   const load = useCallback(async () => {
-    if (!accountId) return;
     const supabase = createClient();
-    const { data, error: fetchErr } = await supabase
-      .from("notifications")
-      .select("*")
-      .eq("account_id", accountId)
-      .order("created_at", { ascending: false })
-      .limit(100);
-    if (fetchErr) {
-      setError(fetchErr.message);
+    const { data, error: rpcError } = await supabase.rpc(
+      'list_current_notifications',
+      { p_limit: 100 }
+    );
+    if (rpcError) {
+      setError(rpcError.message);
       return;
     }
-    setNotifications((data ?? []) as Notification[]);
-  }, [accountId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load();
-  }, [load]);
-
-  // Realtime — new assignments appear without a refresh, and a
-  // "mark all read" fired from another tab/device stays in sync here.
-  useEffect(() => {
-    const supabase = createClient();
-    const channel = supabase
-      .channel("notifications-page")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "notifications" },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const row = payload.new as Notification;
-            setNotifications((prev) => {
-              if (!prev) return [row];
-              if (prev.some((n) => n.id === row.id)) return prev;
-              return [row, ...prev];
-            });
-          } else if (payload.eventType === "UPDATE") {
-            const row = payload.new as Notification;
-            setNotifications((prev) =>
-              prev?.map((n) => (n.id === row.id ? { ...n, ...row } : n)) ??
-              prev,
-            );
-          } else if (payload.eventType === "DELETE") {
-            const oldRow = payload.old as Partial<Notification>;
-            setNotifications(
-              (prev) => prev?.filter((n) => n.id !== oldRow.id) ?? prev,
-            );
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    setItems((data ?? []) as Notification[]);
+    setError(null);
   }, []);
 
-  const markRead = useCallback(
-    async (id: string) => {
-      // Optimistic — the row is already visually "read" by the time the
-      // request lands, so the UI doesn't wait on the round-trip.
-      setNotifications(
-        (prev) =>
-          prev?.map((n) =>
-            n.id === id && !n.read_at
-              ? { ...n, read_at: new Date().toISOString() }
-              : n,
-          ) ?? prev,
-      );
-      const supabase = createClient();
-      const { error: updateErr } = await supabase
-        .from("notifications")
-        .update({ read_at: new Date().toISOString() })
-        .eq("id", id)
-        .is("read_at", null);
-      if (updateErr) {
-        toast.error("Failed to mark notification as read");
-        load();
-      }
-    },
-    [load],
+  useEffect(() => {
+    const initial = window.setTimeout(() => void load(), 0);
+    const supabase = createClient();
+    const channel = supabase
+      .channel('contextual-notifications-page')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notifications' },
+        () => void load()
+      )
+      .subscribe();
+    return () => {
+      window.clearTimeout(initial);
+      void supabase.removeChannel(channel);
+    };
+  }, [load]);
+
+  const filtered = useMemo(
+    () =>
+      (items ?? []).filter(
+        (item) =>
+          (category === 'all' || item.category === category) &&
+          (!onlyUnread || !(item.is_read ?? Boolean(item.read_at)))
+      ),
+    [category, items, onlyUnread]
+  );
+  const unread = (items ?? []).filter(
+    (item) => !(item.is_read ?? Boolean(item.read_at))
   );
 
-  const handleClick = useCallback(
-    (n: Notification) => {
-      if (!n.read_at) markRead(n.id);
-      if (n.conversation_id) {
-        router.push(`/inbox?c=${n.conversation_id}`);
-      }
-    },
-    [markRead, router],
-  );
-
-  const unreadIds = notifications?.filter((n) => !n.read_at).map((n) => n.id) ?? [];
+  const markRead = useCallback(async (id: string) => {
+    const supabase = createClient();
+    const { error: readError } = await supabase.rpc('mark_notification_read', {
+      p_notification_id: id,
+    });
+    if (readError) {
+      toast.error('Não foi possível marcar a notificação como lida');
+      return;
+    }
+    setItems(
+      (previous) =>
+        previous?.map((item) =>
+          item.id === id ? { ...item, is_read: true } : item
+        ) ?? previous
+    );
+  }, []);
 
   const markAllRead = useCallback(async () => {
-    if (unreadIds.length === 0) return;
+    if (unread.length === 0) return;
     setMarkingAll(true);
-    const now = new Date().toISOString();
-    setNotifications(
-      (prev) => prev?.map((n) => (n.read_at ? n : { ...n, read_at: now })) ?? prev,
-    );
-    const supabase = createClient();
-    const { error: updateErr } = await supabase
-      .from("notifications")
-      .update({ read_at: now })
-      .is("read_at", null);
+    await Promise.all(unread.map((item) => markRead(item.id)));
     setMarkingAll(false);
-    if (updateErr) {
-      toast.error("Failed to mark all as read");
-      load();
-    }
-  }, [unreadIds.length, load]);
+  }, [markRead, unread]);
+
+  const open = useCallback(
+    (item: Notification) => {
+      if (!(item.is_read ?? Boolean(item.read_at))) void markRead(item.id);
+      const destination =
+        item.target_url ??
+        (item.conversation_id ? `/inbox?c=${item.conversation_id}` : null);
+      if (destination) router.push(destination);
+    },
+    [markRead, router]
+  );
 
   if (error) {
     return (
       <div className="flex h-64 flex-col items-center justify-center gap-2">
-        <p className="text-sm text-destructive">{error}</p>
-        <Button variant="outline" onClick={() => window.location.reload()}>
-          Retry
+        <p className="text-destructive text-sm">{error}</p>
+        <Button variant="outline" onClick={load}>
+          Tentar novamente
         </Button>
       </div>
     );
   }
-
-  if (notifications === null) {
+  if (items === null) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+        <Loader2 className="text-primary h-6 w-6 animate-spin" />
       </div>
     );
   }
 
+  const categories = Array.from(
+    new Set(items.map((item) => item.category).filter(Boolean))
+  ) as NotificationCategory[];
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Notifications</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Conversations other teammates assign to you show up here.
+          <h1 className="text-foreground text-2xl font-bold">
+            Central de notificações
+          </h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Eventos operacionais relevantes de atendimento, campanhas,
+            automações, flows, IA e integrações.
           </p>
         </div>
         <Button
           variant="outline"
           size="sm"
-          disabled={unreadIds.length === 0 || markingAll}
+          disabled={unread.length === 0 || markingAll}
           onClick={markAllRead}
         >
           {markingAll ? (
@@ -181,80 +175,91 @@ export default function NotificationsPage() {
           ) : (
             <CheckCheck className="h-4 w-4" />
           )}
-          Mark all as read
+          Marcar todas como lidas
+        </Button>
+      </header>
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant={category === 'all' ? 'default' : 'outline'}
+          onClick={() => setCategory('all')}
+        >
+          Todas
+        </Button>
+        {categories.map((value) => (
+          <Button
+            key={value}
+            size="sm"
+            variant={category === value ? 'default' : 'outline'}
+            onClick={() => setCategory(value)}
+            className="capitalize"
+          >
+            {value}
+          </Button>
+        ))}
+        <Button
+          size="sm"
+          variant={onlyUnread ? 'default' : 'outline'}
+          onClick={() => setOnlyUnread((value) => !value)}
+        >
+          Não lidas ({unread.length})
         </Button>
       </div>
 
-      {notifications.length === 0 ? (
-        <div className="flex h-48 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/40">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <Bell className="h-6 w-6 text-primary" />
-          </div>
-          <p className="mt-3 text-sm font-medium text-foreground">
-            No notifications yet
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            You&apos;ll see an alert here when someone assigns you a
-            conversation.
+      {filtered.length === 0 ? (
+        <div className="border-border bg-muted/40 flex h-48 flex-col items-center justify-center rounded-xl border border-dashed">
+          <Bell className="text-primary h-7 w-7" />
+          <p className="text-foreground mt-3 text-sm font-medium">
+            Nenhuma notificação neste filtro
           </p>
         </div>
       ) : (
         <ul className="space-y-2">
-          {notifications.map((n) => {
-            const Icon = TYPE_ICON[n.type] ?? Bell;
-            const isUnread = !n.read_at;
+          {filtered.map((item) => {
+            const itemCategory = item.category ?? 'system';
+            const severity = item.severity ?? 'info';
+            const Icon = CATEGORY_ICON[itemCategory];
+            const isUnread = !(item.is_read ?? Boolean(item.read_at));
             return (
-              <li key={n.id}>
+              <li key={item.id}>
                 <button
                   type="button"
-                  onClick={() => handleClick(n)}
+                  onClick={() => open(item)}
                   className={cn(
-                    "flex w-full items-start gap-3 rounded-xl border p-4 text-left transition-colors",
-                    isUnread
-                      ? "border-primary/30 bg-primary/5 hover:border-primary/50"
-                      : "border-border bg-card hover:border-border/70",
+                    'hover:border-primary/50 flex w-full items-start gap-3 rounded-xl border p-4 text-left transition-colors',
+                    SEVERITY_CLASS[severity],
+                    !isUnread && 'opacity-75'
                   )}
                 >
-                  <div
-                    className={cn(
-                      "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg",
-                      isUnread ? "bg-primary/15" : "bg-muted",
-                    )}
-                    aria-hidden
-                  >
-                    <Icon
-                      className={cn(
-                        "h-5 w-5",
-                        isUnread ? "text-primary" : "text-muted-foreground",
-                      )}
-                    />
+                  <div className="bg-muted flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+                    <Icon className="text-primary h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={cn(
-                          "truncate text-sm font-semibold",
-                          isUnread ? "text-foreground" : "text-muted-foreground",
-                        )}
-                      >
-                        {n.title}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-foreground text-sm font-semibold">
+                        {item.title}
+                      </span>
+                      <span className="border-border text-muted-foreground rounded-full border px-2 py-0.5 text-[10px] uppercase">
+                        {itemCategory} · {severity}
                       </span>
                       {isUnread && (
-                        <span
-                          aria-label="Unread"
-                          className="h-2 w-2 flex-shrink-0 rounded-full bg-primary"
-                        />
+                        <span className="bg-primary h-2 w-2 rounded-full" />
                       )}
                     </div>
-                    {n.body && (
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {n.body}
+                    {item.body && (
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        {item.body}
                       </p>
                     )}
-                    <p className="mt-1 text-[11px] text-muted-foreground/70">
-                      {formatDistanceToNow(new Date(n.created_at), {
-                        addSuffix: true,
-                      })}
+                    <p className="text-muted-foreground/70 mt-1 text-[11px]">
+                      {formatDistanceToNow(
+                        new Date(item.last_occurred_at ?? item.created_at),
+                        { addSuffix: true, locale: ptBR }
+                      )}
+                      {(item.occurrence_count ?? 1) > 1
+                        ? ` · ${item.occurrence_count} ocorrências`
+                        : ''}
                     </p>
                   </div>
                 </button>

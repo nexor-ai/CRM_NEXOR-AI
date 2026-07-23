@@ -46,6 +46,9 @@ interface BroadcastPayload {
    * falls back to the template's stored URL only when this is empty.
    */
   headerMediaUrl?: string;
+  intervalMinutes: number;
+  scheduledAt?: string | null;
+  messageVariations?: string[];
 }
 
 interface UseBroadcastSendingReturn {
@@ -54,27 +57,8 @@ interface UseBroadcastSendingReturn {
   progress: number;
 }
 
-/**
- * Meta rate-limit buffer. 10 per batch + 1 s pause matches the spec
- * and keeps us comfortably under Meta's per-phone-number messaging
- * rate so a large broadcast never trips the upstream limiter.
- */
-const SEND_BATCH_SIZE = 10;
-const SEND_BATCH_DELAY_MS = 1000;
-
 /** `broadcast_recipients` inserts are independent of the send rate. */
 const INSERT_BATCH_SIZE = 200;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-interface BroadcastApiResult {
-  phone: string;
-  status: 'sent' | 'failed';
-  whatsapp_message_id?: string;
-  error?: string;
-}
 
 /** contactId → (customFieldId → value). */
 type CustomValueIndex = Map<string, Map<string, string>>;
@@ -87,7 +71,7 @@ type CustomValueIndex = Map<string, Map<string, string>>;
 export function resolveVariables(
   variables: Record<string, VariableMapping>,
   contact: Contact,
-  customValues?: Map<string, string>,
+  customValues?: Map<string, string>
 ): string[] {
   // Keys are typically "1","2",... — numeric-aware sort keeps
   // {{1}} before {{10}}.
@@ -123,7 +107,7 @@ export function resolveVariables(
  */
 async function fetchCustomValueIndex(
   supabase: ReturnType<typeof createClient>,
-  contactIds: string[],
+  contactIds: string[]
 ): Promise<CustomValueIndex> {
   const index: CustomValueIndex = new Map();
   if (contactIds.length === 0) return index;
@@ -182,11 +166,15 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
           .from('contacts')
           .select('*')
           .in('id', uniqueContactIds);
-        if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
+        if (error)
+          throw new Error(`Failed to fetch contacts: ${error.message}`);
         contacts = data ?? [];
       }
     } else if (audience.type === 'custom_field' && audience.customField) {
-      contacts = await resolveCustomFieldAudience(supabase, audience.customField);
+      contacts = await resolveCustomFieldAudience(
+        supabase,
+        audience.customField
+      );
     } else if (audience.type === 'csv' && audience.csvContacts) {
       contacts = await upsertCsvContacts(supabase, audience.csvContacts);
     }
@@ -218,7 +206,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
    */
   async function upsertCsvContacts(
     supabase: ReturnType<typeof createClient>,
-    csvRows: { phone: string; name?: string }[],
+    csvRows: { phone: string; name?: string }[]
   ): Promise<Contact[]> {
     if (csvRows.length === 0) return [];
 
@@ -289,7 +277,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
   async function resolveCustomFieldAudience(
     supabase: ReturnType<typeof createClient>,
-    filter: CustomFieldFilter,
+    filter: CustomFieldFilter
   ): Promise<Contact[]> {
     const { fieldId, operator, value } = filter;
 
@@ -303,7 +291,8 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
     if (operator === 'is') query = query.eq('value', value);
     else if (operator === 'is_not') query = query.neq('value', value);
-    else if (operator === 'contains') query = query.ilike('value', `%${value}%`);
+    else if (operator === 'contains')
+      query = query.ilike('value', `%${value}%`);
 
     const { data: matches, error: matchErr } = await query;
     if (matchErr)
@@ -320,7 +309,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     return data ?? [];
   }
 
-  async function createAndSendBroadcast(payload: BroadcastPayload): Promise<string> {
+  async function createAndSendBroadcast(
+    payload: BroadcastPayload
+  ): Promise<string> {
     setIsProcessing(true);
     setProgress(0);
 
@@ -368,7 +359,11 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             customField: payload.audience.customField,
             excludeTagIds: payload.audience.excludeTagIds,
           },
-          status: 'sending',
+          status: payload.scheduledAt ? 'scheduled' : 'sending',
+          scheduled_at: payload.scheduledAt ?? new Date().toISOString(),
+          next_send_at: payload.scheduledAt ?? new Date().toISOString(),
+          interval_minutes: Math.max(5, payload.intervalMinutes),
+          message_variations: payload.messageVariations ?? [],
           total_recipients: contacts.length,
           sent_count: 0,
           delivered_count: 0,
@@ -381,16 +376,26 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
       if (broadcastError || !broadcast) {
         throw new Error(
-          `Failed to create broadcast: ${broadcastError?.message ?? 'unknown error'}`,
+          `Failed to create broadcast: ${broadcastError?.message ?? 'unknown error'}`
         );
       }
 
       // ── Step 3: Insert recipient rows ─────────────────────────────
       setProgress(20);
-      const recipientRows = contacts.map((contact) => ({
+      const customValueIndex = await fetchCustomValueIndex(
+        supabase,
+        contacts.map((contact) => contact.id)
+      );
+      const recipientRows = contacts.map((contact, index) => ({
         broadcast_id: broadcast.id,
         contact_id: contact.id,
         status: 'pending' as const,
+        send_params: resolveVariables(
+          payload.variables,
+          contact,
+          customValueIndex.get(contact.id)
+        ),
+        variation_index: index,
       }));
 
       for (let i = 0; i < recipientRows.length; i += INSERT_BATCH_SIZE) {
@@ -412,158 +417,13 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             })
             .eq('id', broadcast.id);
           throw new Error(
-            `Failed to insert recipient batch ${i / INSERT_BATCH_SIZE + 1}: ${recipientError.message}`,
+            `Failed to insert recipient batch ${i / INSERT_BATCH_SIZE + 1}: ${recipientError.message}`
           );
         }
       }
 
-      // ── Step 4: Fetch recipients (joined contact) + preload custom values
-      setProgress(30);
-      const { data: recipients, error: recipientsFetchError } = await supabase
-        .from('broadcast_recipients')
-        .select('*, contact:contacts(*)')
-        .eq('broadcast_id', broadcast.id);
-
-      if (recipientsFetchError || !recipients) {
-        throw new Error('Failed to fetch broadcast recipients');
-      }
-
-      // One bulk fetch of custom values for every contact in this
-      // broadcast, avoiding N+1 during the send loop.
-      const contactIds = recipients
-        .map((r) => r.contact?.id)
-        .filter((id): id is string => Boolean(id));
-      const customValueIndex = await fetchCustomValueIndex(
-        supabase,
-        contactIds,
-      );
-
-      let failedCount = 0;
-      const totalRecipients = recipients.length;
-
-      // Media-header templates (image/video/document) require a media
-      // URL on every send. Collected in the personalize step and applied
-      // to all recipients; falls back to the template's stored URL on the
-      // server when omitted.
-      const headerType = payload.template.header_type;
-      const isMediaHeader =
-        headerType === 'image' ||
-        headerType === 'video' ||
-        headerType === 'document';
-      const headerMediaUrl = payload.headerMediaUrl?.trim();
-      const messageParams =
-        isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
-
-      for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
-        const batch = recipients.slice(i, i + SEND_BATCH_SIZE);
-
-        const apiRecipients = batch
-          .filter((r) => r.contact?.phone)
-          .map((r) => ({
-            phone: r.contact!.phone as string,
-            params: r.contact
-              ? resolveVariables(
-                  payload.variables,
-                  r.contact,
-                  customValueIndex.get(r.contact.id),
-                )
-              : [],
-            ...(messageParams ? { messageParams } : {}),
-          }));
-
-        if (apiRecipients.length === 0) continue;
-
-        try {
-          const res = await fetch('/api/whatsapp/broadcast', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              recipients: apiRecipients,
-              template_name: payload.template.name,
-              template_language: payload.template.language ?? 'en_US',
-            }),
-          });
-
-          const data = await res.json();
-
-          if (!res.ok) {
-            throw new Error(data.error || 'Broadcast API request failed');
-          }
-
-          const resultsByPhone = new Map<string, BroadcastApiResult>();
-          for (const r of (data.results ?? []) as BroadcastApiResult[]) {
-            resultsByPhone.set(r.phone, r);
-          }
-
-          for (const recipient of batch) {
-            const phone = recipient.contact?.phone;
-            const result = phone ? resultsByPhone.get(phone) : undefined;
-
-            if (!result) {
-              failedCount++;
-              await supabase
-                .from('broadcast_recipients')
-                .update({
-                  status: 'failed',
-                  error_message: 'No phone number on contact',
-                })
-                .eq('id', recipient.id);
-              continue;
-            }
-
-            if (result.status === 'sent') {
-              await supabase
-                .from('broadcast_recipients')
-                .update({
-                  status: 'sent',
-                  sent_at: new Date().toISOString(),
-                  whatsapp_message_id: result.whatsapp_message_id ?? null,
-                  error_message: null,
-                })
-                .eq('id', recipient.id);
-            } else {
-              failedCount++;
-              await supabase
-                .from('broadcast_recipients')
-                .update({
-                  status: 'failed',
-                  error_message: result.error ?? 'Unknown error',
-                })
-                .eq('id', recipient.id);
-            }
-          }
-        } catch (err) {
-          for (const recipient of batch) {
-            failedCount++;
-            await supabase
-              .from('broadcast_recipients')
-              .update({
-                status: 'failed',
-                error_message: err instanceof Error ? err.message : 'Unknown error',
-              })
-              .eq('id', recipient.id);
-          }
-        }
-
-        const progressPct =
-          30 + Math.round(((i + batch.length) / totalRecipients) * 60);
-        setProgress(progressPct);
-
-        if (i + SEND_BATCH_SIZE < recipients.length) {
-          await sleep(SEND_BATCH_DELAY_MS);
-        }
-      }
-
-      // ── Step 5: Finalize status ───────────────────────────────────
-      // Aggregate counts are maintained by the DB trigger (migration
-      // 003); we only flip the final status here.
-      setProgress(95);
-      const finalStatus = failedCount === totalRecipients ? 'failed' : 'sent';
-      await supabase
-        .from('broadcasts')
-        .update({ status: finalStatus })
-        .eq('id', broadcast.id);
-
+      // No message is sent from the browser. The persistent worker claims
+      // exactly one recipient when next_send_at is due.
       setProgress(100);
       return broadcast.id;
     } finally {

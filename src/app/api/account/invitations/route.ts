@@ -207,7 +207,7 @@ export async function POST(request: Request) {
       const trimmed = body.label.trim();
       if (trimmed.length > MAX_LABEL_LEN) {
         return NextResponse.json(
-          { error: `Label must be ${MAX_LABEL_LEN} characters or fewer` },
+          { error: `O rótulo deve ter no máximo ${MAX_LABEL_LEN} caracteres` },
           { status: 400 },
         );
       }

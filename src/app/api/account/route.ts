@@ -73,7 +73,7 @@ export async function PATCH(request: Request) {
     }
     if (name.length > MAX_NAME_LEN) {
       return NextResponse.json(
-        { error: `Account name must be ${MAX_NAME_LEN} characters or fewer` },
+        { error: `O nome da conta deve ter no máximo ${MAX_NAME_LEN} caracteres` },
         { status: 400 },
       );
     }

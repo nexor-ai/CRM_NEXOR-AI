@@ -112,7 +112,7 @@ export default function InboxPage() {
   // row's own columns — a brand-new conversation arrives without a
   // contact, which surfaced as "Unknown" names, empty avatars, and
   // (when the conv-INSERT event was delayed past the message-INSERT)
-  // conversations stuck on "No messages yet" until the user reloaded.
+  // conversations stuck on "Nenhuma mensagem ainda" until the user reloaded.
   // Also self-heals if a realtime event was missed: callers can invoke
   // this whenever they reference a conversation id they don't recognise.
   const hydrateConversation = useCallback(async (convId: string) => {
@@ -408,7 +408,7 @@ export default function InboxPage() {
         // would setMessages([]) on a thread whose messages have
         // already been loaded by MessageThread — and because
         // conversationId didn't change, MessageThread wouldn't
-        // refetch. The thread would read "No messages yet" until a
+        // refetch. The thread would read "Nenhuma mensagem ainda" until a
         // full page reload rehydrated state from scratch.
         if (activeConversation?.id === deepLinkConvId) return;
         const match = loaded.find((c) => c.id === deepLinkConvId);
@@ -541,6 +541,34 @@ export default function InboxPage() {
     [activeConversation]
   );
 
+  const handleConversationPatch = useCallback(
+    (conversationId: string, updates: Partial<Conversation>) => {
+      setConversations((prev) =>
+        prev.map((conversation) =>
+          conversation.id === conversationId ? { ...conversation, ...updates } : conversation,
+        ),
+      );
+      setActiveConversation((prev) =>
+        prev?.id === conversationId ? { ...prev, ...updates } : prev,
+      );
+    },
+    [],
+  );
+
+  const handleContactPatch = useCallback((contact: Contact) => {
+    setActiveContact(contact);
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.contact_id === contact.id
+          ? { ...conversation, contact }
+          : conversation,
+      ),
+    );
+    setActiveConversation((prev) =>
+      prev?.contact_id === contact.id ? { ...prev, contact } : prev,
+    );
+  }, []);
+
   // On mobile (<lg) we show a SINGLE pane — either the list or the
   // thread — rather than cramming both side-by-side. Selecting a
   // conversation slides the thread in; the thread's back button pops
@@ -605,6 +633,8 @@ export default function InboxPage() {
             onUpdateMessage={handleUpdateMessage}
             onStatusChange={handleStatusChange}
             onAssignChange={handleAssignChange}
+            onConversationPatch={handleConversationPatch}
+            onContactPatch={handleContactPatch}
             onBack={handleCloseConversation}
             resyncToken={resyncToken}
             onRefresh={handleManualRefresh}

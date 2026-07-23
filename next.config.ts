@@ -1,4 +1,5 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next';
+import path from 'node:path';
 
 /**
  * Baseline security headers applied to every response.
@@ -18,22 +19,22 @@ import type { NextConfig } from "next";
  */
 const SECURITY_HEADERS = [
   {
-    key: "Strict-Transport-Security",
-    value: "max-age=63072000; includeSubDomains; preload",
+    key: 'Strict-Transport-Security',
+    value: 'max-age=63072000; includeSubDomains; preload',
   },
-  { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "X-Frame-Options", value: "DENY" },
-  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  { key: 'X-Frame-Options', value: 'DENY' },
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
   {
     // Microphone is allowed for same-origin (`self`) so the inbox
     // composer can record voice notes via MediaRecorder. Everything
     // else stays denied — a compromised dependency can't silently grab
     // the camera / geolocation / etc.
-    key: "Permissions-Policy",
-    value: "camera=(), microphone=(self), geolocation=(), payment=(), usb=()",
+    key: 'Permissions-Policy',
+    value: 'camera=(), microphone=(self), geolocation=(), payment=(), usb=()',
   },
   {
-    key: "Content-Security-Policy-Report-Only",
+    key: 'Content-Security-Policy-Report-Only',
     value: [
       "default-src 'self'",
       // Next.js needs 'unsafe-inline' for its inline hydration script
@@ -56,11 +57,20 @@ const SECURITY_HEADERS = [
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
-    ].join("; "),
+    ].join('; '),
   },
 ] as const;
 
 const nextConfig: NextConfig = {
+  // Production is promoted to an isolated directory before the service
+  // restarts. Regular `next build` runs keep using `.next`, so validating a
+  // candidate on 3011 can no longer replace chunks/CSS under the live 3010
+  // process.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
+  turbopack: {
+    root: path.resolve(process.cwd()),
+  },
+  outputFileTracingRoot: path.resolve(process.cwd()),
   /**
    * Cache-Control policy.
    *
@@ -79,19 +89,11 @@ const nextConfig: NextConfig = {
    *     the correct production headers for hashed assets.
    *   - /api/*          — no-store. API responses are per-user and
    *     must never be shared across requests at the edge.
-   *   - Everything else — public, brief s-maxage + generous
-   *     stale-while-revalidate. The edge serves instantly from cache
-   *     for the first 5 min, then returns cached content while
-   *     refreshing in the background for up to 24 h. A deploy's
-   *     chunk-hash drift self-heals within ~5 min with no user-
-   *     visible latency.
-   *
-   *   Note: dynamic dashboard routes (/inbox, /contacts, /pipelines,
-   *   /broadcasts, etc.) are server-rendered per request — Next.js
-   *   and Supabase auth already prevent them from being served
-   *   from a shared cache. The s-maxage here is a ceiling; Next.js
-   *   and auth middleware still set `private` / `no-store` for
-   *   per-user responses.
+   *   - Everything else — private + no-store. The same pathname can
+   *     return authenticated app HTML, an auth redirect, or a signed-in
+   *     redirect away from /login. A shared edge cache must never reuse
+   *     one of those responses for another session. This also prevents
+   *     stale HTML/RSC from referencing chunks removed by a later deploy.
    *
    * Security headers are appended via a separate catch-all rule
    * below — Next.js merges headers from every matching rule, so
@@ -101,16 +103,15 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: "/api/:path*",
-        headers: [{ key: "Cache-Control", value: "no-store" }],
+        source: '/api/:path*',
+        headers: [{ key: 'Cache-Control', value: 'no-store' }],
       },
       {
-        source: "/:path((?!_next/static|_next/image|api).*)",
+        source: '/:path((?!_next/static|_next/image|api).*)',
         headers: [
           {
-            key: "Cache-Control",
-            value:
-              "public, max-age=0, s-maxage=300, stale-while-revalidate=86400",
+            key: 'Cache-Control',
+            value: 'private, no-store, max-age=0, must-revalidate',
           },
         ],
       },
@@ -118,7 +119,7 @@ const nextConfig: NextConfig = {
         // Security headers on every response, including /_next/static
         // assets (nosniff matters there) and /api/* (HSTS + referrer-
         // policy don't hurt).
-        source: "/:path*",
+        source: '/:path*',
         headers: [...SECURITY_HEADERS],
       },
     ];

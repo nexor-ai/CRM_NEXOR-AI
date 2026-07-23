@@ -12,6 +12,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
 import { resolveImportTagIds } from '@/lib/contacts/resolve-import-tags';
 import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
+import { resolveActiveWhatsAppConfig } from '@/lib/whatsapp/resolve-config';
 
 /** Row select that embeds the contact's tags for serialization. */
 export const CONTACT_SELECT = '*, contact_tags(tags(*))';
@@ -73,11 +74,7 @@ export async function resolveAuditUserId(
   db: SupabaseClient,
   accountId: string
 ): Promise<string> {
-  const { data: config } = await db
-    .from('whatsapp_config')
-    .select('user_id')
-    .eq('account_id', accountId)
-    .maybeSingle();
+  const config = await resolveActiveWhatsAppConfig(db, accountId);
   const configOwner = config?.user_id as string | undefined;
   if (configOwner) return configOwner;
 
@@ -183,9 +180,7 @@ export async function setContactTags(
   if (readErr) {
     throw new ContactError('Failed to read contact tags', 500);
   }
-  const existing = new Set(
-    (current ?? []).map((r) => r.tag_id as string)
-  );
+  const existing = new Set((current ?? []).map((r) => r.tag_id as string));
 
   const toAdd = [...desired].filter((id) => !existing.has(id));
   const toRemove = [...existing].filter((id) => !desired.has(id));

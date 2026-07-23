@@ -12,18 +12,20 @@ import { Step3Personalize } from '@/components/broadcasts/step3-personalize';
 import { Step4ScheduleSend } from '@/components/broadcasts/step4-schedule-send';
 import { useBroadcastSending } from '@/hooks/use-broadcast-sending';
 import { Check } from 'lucide-react';
+import { CAMPAIGN_TEMPLATE_PRESETS } from '@/lib/broadcast-campaign';
 
 const steps = [
-  { label: 'Template', key: 'template' },
-  { label: 'Audience', key: 'audience' },
-  { label: 'Personalize', key: 'personalize' },
-  { label: 'Send', key: 'send' },
+  { label: 'Modelo', key: 'template' },
+  { label: 'Público', key: 'audience' },
+  { label: 'Personalizar', key: 'personalize' },
+  { label: 'Enviar', key: 'send' },
 ] as const;
 
 export default function NewBroadcastPage() {
   const router = useRouter();
   const { accountId } = useAuth();
-  const { createAndSendBroadcast, isProcessing, progress } = useBroadcastSending();
+  const { createAndSendBroadcast, isProcessing, progress } =
+    useBroadcastSending();
 
   const [currentStep, setCurrentStep] = useState(0);
   const [template, setTemplate] = useState<MessageTemplate | null>(null);
@@ -43,6 +45,9 @@ export default function NewBroadcastPage() {
   >({});
   const [headerMediaUrl, setHeaderMediaUrl] = useState('');
   const [name, setName] = useState('');
+  const [intervalMinutes, setIntervalMinutes] = useState(5);
+  const [scheduledAt, setScheduledAt] = useState<string | null>(null);
+  const [messageVariations, setMessageVariations] = useState<string[]>([]);
 
   async function handleSend() {
     if (!template) return;
@@ -60,6 +65,9 @@ export default function NewBroadcastPage() {
         },
         variables,
         headerMediaUrl,
+        intervalMinutes,
+        scheduledAt,
+        messageVariations,
       });
       router.push(`/broadcasts/${broadcastId}`);
     } catch (err) {
@@ -82,7 +90,7 @@ export default function NewBroadcastPage() {
    */
   async function handleSaveDraft() {
     if (!template || !name.trim()) {
-      toast.error('Give the broadcast a name before saving a draft.');
+      toast.error('Dê um nome ao disparo antes de salvar o rascunho.');
       return;
     }
     const supabase = createClient();
@@ -91,11 +99,11 @@ export default function NewBroadcastPage() {
     } = await supabase.auth.getSession();
     const user = session?.user;
     if (!user) {
-      toast.error('Not signed in.');
+      toast.error('Você não está conectado.');
       return;
     }
     if (!accountId) {
-      toast.error('Your profile is not linked to an account.');
+      toast.error('Seu perfil não está vinculado a uma conta.');
       return;
     }
 
@@ -120,10 +128,10 @@ export default function NewBroadcastPage() {
     });
 
     if (error) {
-      toast.error(`Failed to save draft: ${error.message}`);
+      toast.error(`Falha ao salvar o rascunho: ${error.message}`);
       return;
     }
-    toast.success('Draft saved');
+    toast.success('Rascunho salvo');
     router.push('/broadcasts');
   }
 
@@ -131,9 +139,9 @@ export default function NewBroadcastPage() {
     <div className="mx-auto max-w-3xl space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-foreground">New Broadcast</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Create and send a broadcast message to your contacts.
+        <h1 className="text-foreground text-2xl font-bold">Novo disparo</h1>
+        <p className="text-muted-foreground mt-1 text-sm">
+          Crie e envie uma mensagem em massa para seus contatos.
         </p>
       </div>
 
@@ -151,15 +159,19 @@ export default function NewBroadcastPage() {
                     isCompleted
                       ? 'bg-primary text-primary-foreground'
                       : isActive
-                        ? 'border-2 border-primary bg-primary/10 text-primary'
-                        : 'border border-border bg-muted text-muted-foreground'
+                        ? 'border-primary bg-primary/10 text-primary border-2'
+                        : 'border-border bg-muted text-muted-foreground border'
                   }`}
                 >
                   {isCompleted ? <Check className="h-4 w-4" /> : index + 1}
                 </div>
                 <span
                   className={`hidden text-sm font-medium sm:block ${
-                    isActive ? 'text-foreground' : isCompleted ? 'text-primary' : 'text-muted-foreground'
+                    isActive
+                      ? 'text-foreground'
+                      : isCompleted
+                        ? 'text-primary'
+                        : 'text-muted-foreground'
                   }`}
                 >
                   {step.label}
@@ -189,7 +201,17 @@ export default function NewBroadcastPage() {
           {currentStep === 0 && (
             <Step1ChooseTemplate
               selectedTemplate={template}
-              onSelect={setTemplate}
+              onSelect={(selected) => {
+                setTemplate(selected);
+                const preset = CAMPAIGN_TEMPLATE_PRESETS.find((item) =>
+                  selected.name
+                    .toLowerCase()
+                    .includes(item.slug.replaceAll('-', '_'))
+                );
+                setMessageVariations(
+                  preset?.variations ?? [selected.body_text]
+                );
+              }}
               onNext={() => setCurrentStep(1)}
               onBack={() => router.push('/broadcasts')}
             />
@@ -224,6 +246,12 @@ export default function NewBroadcastPage() {
               onBack={() => setCurrentStep(2)}
               isProcessing={isProcessing}
               progress={progress}
+              intervalMinutes={intervalMinutes}
+              onIntervalMinutesChange={setIntervalMinutes}
+              scheduledAt={scheduledAt}
+              onScheduledAtChange={setScheduledAt}
+              messageVariations={messageVariations}
+              onMessageVariationsChange={setMessageVariations}
             />
           )}
         </div>

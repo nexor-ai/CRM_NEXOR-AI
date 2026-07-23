@@ -12,10 +12,22 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Evolution sendMedia payloads", () => {
   it("sends image with caption", async () => {
-    await sendMediaMessage({ baseUrl: "https://evo", apiKey: "k", instanceName: "i", to: "123", kind: "image", link: "https://cdn/x.png", caption: "hi" });
+    await sendMediaMessage({ baseUrl: "https://evo", apiKey: "k", instanceName: "i", to: "123", kind: "image", link: "https://cdn/x.png", caption: "hi", contextMessageId: "parent", contextFromMe: true });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("https://evo/message/sendMedia/i");
-    expect(JSON.parse(init.body)).toMatchObject({ number: "123", mediatype: "image", media: "https://cdn/x.png", caption: "hi" });
+    expect(JSON.parse(init.body)).toMatchObject({
+      number: "123",
+      mediatype: "image",
+      media: "https://cdn/x.png",
+      caption: "hi",
+      quoted: {
+        key: {
+          remoteJid: "123@s.whatsapp.net",
+          fromMe: true,
+          id: "parent",
+        },
+      },
+    });
   });
 
   it("sends document with filename", async () => {

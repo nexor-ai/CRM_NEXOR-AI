@@ -22,8 +22,6 @@
 //               "total_recipients", "accepted", "rejected" } }
 // ============================================================
 
-import { after } from 'next/server';
-
 import { requireApiKey } from '@/lib/auth/api-context';
 
 // The `after()` fan-out below sends to every recipient sequentially and
@@ -37,11 +35,7 @@ import { requireApiKey } from '@/lib/auth/api-context';
 export const maxDuration = 60;
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { resolveAuditUserId, ContactError } from '@/lib/api/v1/contacts';
-import {
-  createBroadcast,
-  deliverBroadcast,
-  BroadcastError,
-} from '@/lib/whatsapp/broadcast-core';
+import { createBroadcast, BroadcastError } from '@/lib/whatsapp/broadcast-core';
 
 export async function POST(request: Request) {
   try {
@@ -61,28 +55,37 @@ export async function POST(request: Request) {
 
     const auditUserId = await resolveAuditUserId(ctx.supabase, ctx.accountId);
 
-    const plan = await createBroadcast(ctx.supabase, ctx.accountId, auditUserId, {
-      name: typeof body.name === 'string' ? body.name : null,
-      templateName,
-      templateLanguage:
-        typeof body.template_language === 'string'
-          ? body.template_language
-          : null,
-      recipients: recipients.map((r) => ({
-        to: typeof r?.to === 'string' ? r.to : '',
-        params: Array.isArray(r?.params) ? r.params : undefined,
-      })),
-    });
-
-    // Fan out after the response is sent. Uses the same service-role
-    // client — no request-scoped auth needed for the Meta calls or
-    // the account-scoped row updates.
-    after(() => deliverBroadcast(ctx.supabase, plan));
+    const plan = await createBroadcast(
+      ctx.supabase,
+      ctx.accountId,
+      auditUserId,
+      {
+        name: typeof body.name === 'string' ? body.name : null,
+        templateName,
+        templateLanguage:
+          typeof body.template_language === 'string'
+            ? body.template_language
+            : null,
+        recipients: recipients.map((r) => ({
+          to: typeof r?.to === 'string' ? r.to : '',
+          params: Array.isArray(r?.params) ? r.params : undefined,
+        })),
+        intervalMinutes:
+          typeof body.interval_minutes === 'number' ? body.interval_minutes : 5,
+        scheduledAt:
+          typeof body.scheduled_at === 'string' ? body.scheduled_at : null,
+        messageVariations: Array.isArray(body.message_variations)
+          ? body.message_variations.filter(
+              (value): value is string => typeof value === 'string'
+            )
+          : [],
+      }
+    );
 
     return ok(
       {
         broadcast_id: plan.broadcastId,
-        status: 'sending',
+        status: 'queued',
         total_recipients: plan.planned.length,
         accepted: plan.planned.length,
         rejected: plan.rejected,

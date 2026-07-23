@@ -14,8 +14,10 @@ import type {
   CreateDealStepConfig,
   AssignConversationStepConfig,
 } from '@/types'
+import { postJsonToPinnedPublicUrl } from '@/lib/webhooks/pinned-request'
 import { supabaseAdmin } from './admin-client'
 import { engineSendText, engineSendTemplate } from './meta-send'
+
 
 // ------------------------------------------------------------
 // Public API
@@ -82,6 +84,27 @@ export async function runAutomationsForTrigger(input: DispatchInput): Promise<vo
       }
     }
 
+    if (input.context?.conversation_id) {
+      let conversationQuery = db
+        .from('conversations')
+        .select('id')
+        .eq('id', input.context.conversation_id)
+        .eq('account_id', input.accountId)
+      if (input.contactId) conversationQuery = conversationQuery.eq('contact_id', input.contactId)
+      const { data: ownedConversation, error: conversationErr } = await conversationQuery.maybeSingle()
+      if (conversationErr) {
+        console.error('[automations] conversation ownership check failed:', conversationErr)
+        return
+      }
+      if (!ownedConversation) {
+        console.warn(
+          '[automations] conversation not in account/contact, refusing dispatch',
+          input.context.conversation_id,
+        )
+        return
+      }
+    }
+
     const { data: automations, error } = await db
       .from('automations')
       .select('*')
@@ -112,7 +135,7 @@ export async function runAutomationsForTrigger(input: DispatchInput): Promise<vo
  * Resume a run that was parked at a wait step. Called from the cron
  * endpoint after it grabs a due `automation_pending_executions` row.
  */
-export async function resumePendingExecution(pending: {
+export interface PendingExecution {
   id: string
   automation_id: string
   /** Audit-only; the automation row carries account_id for tenancy. */
@@ -127,17 +150,23 @@ export async function resumePendingExecution(pending: {
   branch: 'yes' | 'no' | null
   next_step_position: number
   context: AutomationContext
-}): Promise<void> {
+}
+
+export async function resumePendingExecution(pending: PendingExecution): Promise<void> {
   const db = supabaseAdmin()
+  const pendingIsValid = await validatePendingExecutionScope(pending)
+  if (!pendingIsValid) return
+
   const { data: automation, error } = await db
     .from('automations')
     .select('*')
     .eq('id', pending.automation_id)
+    .eq('account_id', pending.account_id)
     .single()
 
   if (error || !automation) {
     console.error('[automations] resume: missing automation', pending.automation_id, error)
-    await markPending(pending.id, 'failed')
+    await markPending(pending, 'failed')
     return
   }
 
@@ -152,11 +181,82 @@ export async function resumePendingExecution(pending: {
       logId: pending.log_id,
       triggerEvent: 'resumed_wait',
     })
-    await markPending(pending.id, 'done')
+    await markPending(pending, 'done')
   } catch (err) {
     console.error('[automations] resume failed:', err)
-    await markPending(pending.id, 'failed')
+    await markPending(pending, 'failed')
   }
+}
+
+async function validatePendingExecutionScope(pending: PendingExecution): Promise<boolean> {
+  const db = supabaseAdmin()
+  const { data: claimed, error: claimError } = await db
+    .from('automation_pending_executions')
+    .select('id')
+    .eq('id', pending.id)
+    .eq('account_id', pending.account_id)
+    .eq('automation_id', pending.automation_id)
+    .eq('status', 'running')
+    .maybeSingle()
+  if (claimError || !claimed) {
+    console.error('[automations] resume: pending claim scope mismatch', pending.id, claimError)
+    return false
+  }
+
+  const reject = async (reason: string) => {
+    console.error('[automations] resume: invalid pending scope', pending.id, reason)
+    await markPending(pending, 'failed')
+    return false
+  }
+
+  if (pending.contact_id) {
+    const { data: contact, error } = await db
+      .from('contacts')
+      .select('id')
+      .eq('id', pending.contact_id)
+      .eq('account_id', pending.account_id)
+      .maybeSingle()
+    if (error || !contact) return reject('contact')
+  }
+
+  if (pending.log_id) {
+    let logQuery = db
+      .from('automation_logs')
+      .select('id')
+      .eq('id', pending.log_id)
+      .eq('account_id', pending.account_id)
+      .eq('automation_id', pending.automation_id)
+    logQuery = pending.contact_id
+      ? logQuery.eq('contact_id', pending.contact_id)
+      : logQuery.is('contact_id', null)
+    const { data: log, error } = await logQuery.maybeSingle()
+    if (error || !log) return reject('log')
+  }
+
+  if (pending.parent_step_id) {
+    const { data: parent, error } = await db
+      .from('automation_steps')
+      .select('id')
+      .eq('id', pending.parent_step_id)
+      .eq('automation_id', pending.automation_id)
+      .maybeSingle()
+    if (error || !parent) return reject('parent step')
+  }
+
+  if (pending.context?.conversation_id) {
+    let conversationQuery = db
+      .from('conversations')
+      .select('id')
+      .eq('id', pending.context.conversation_id)
+      .eq('account_id', pending.account_id)
+    if (pending.contact_id) {
+      conversationQuery = conversationQuery.eq('contact_id', pending.contact_id)
+    }
+    const { data: conversation, error } = await conversationQuery.maybeSingle()
+    if (error || !conversation) return reject('conversation')
+  }
+
+  return true
 }
 
 // ------------------------------------------------------------
@@ -241,12 +341,12 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
   const { data: steps, error: stepsErr } = await scoped
 
   if (stepsErr) {
-    await finalizeLog(args.logId, 'failed', stepsErr.message)
-    return
+    await finalizeLog(args, 'failed', stepsErr.message)
+    throw new Error(`automation steps lookup failed: ${stepsErr.message}`)
   }
   if (!steps || steps.length === 0) {
     if (args.parentStepId === null && args.logId) {
-      await finalizeLog(args.logId, 'success', null)
+      await finalizeLog(args, 'success', null)
     }
     return
   }
@@ -261,7 +361,7 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
     if (step.step_type === 'wait') {
       const cfg = step.step_config as WaitStepConfig
       const ms = waitMs(cfg)
-      await db.from('automation_pending_executions').insert({
+      const { error: pendingError } = await db.from('automation_pending_executions').insert({
         automation_id: args.automation.id,
         // Tenancy: account_id required NOT NULL post-017.
         account_id: args.automation.account_id,
@@ -275,6 +375,7 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
         run_at: new Date(Date.now() + ms).toISOString(),
         status: 'pending',
       })
+      if (pendingError) throw new Error(`wait enqueue failed: ${pendingError.message}`)
       results.push({
         step_id: step.id,
         step_type: step.step_type,
@@ -282,7 +383,7 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
         detail: `waiting ${cfg.amount} ${cfg.unit}`,
       })
       status = 'partial'
-      await appendResults(args.logId, results, status, errorMessage)
+      await appendResults(args, results, status, errorMessage)
       return
     }
 
@@ -330,10 +431,10 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
   }
 
   if (args.parentStepId === null) {
-    await appendResults(args.logId, results, status, errorMessage)
+    await appendResults(args, results, status, errorMessage)
   } else {
     // Nested branch — just append results; parent scope decides final status.
-    await appendResults(args.logId, results, null, errorMessage)
+    await appendResults(args, results, null, errorMessage)
   }
 }
 
@@ -398,12 +499,14 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       // runAutomationsForTrigger.
       const cfg = step.step_config as TagStepConfig
       if (!args.contactId || !cfg.tag_id) throw new Error('add_tag needs contact + tag_id')
-      await db
+      await assertTagInAccount(db, cfg.tag_id, args.automation.account_id)
+      const { error } = await db
         .from('contact_tags')
         .upsert(
           { contact_id: args.contactId, tag_id: cfg.tag_id },
           { onConflict: 'contact_id,tag_id', ignoreDuplicates: true },
         )
+      if (error) throw new Error(`add tag failed: ${error.message}`)
       return `tag ${cfg.tag_id} added`
     }
 
@@ -412,11 +515,13 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       // ownership guard, since contact_tags carries no account_id.
       const cfg = step.step_config as TagStepConfig
       if (!args.contactId || !cfg.tag_id) throw new Error('remove_tag needs contact + tag_id')
-      await db
+      await assertTagInAccount(db, cfg.tag_id, args.automation.account_id)
+      const { error } = await db
         .from('contact_tags')
         .delete()
         .eq('contact_id', args.contactId)
         .eq('tag_id', cfg.tag_id)
+      if (error) throw new Error(`remove tag failed: ${error.message}`)
       return `tag ${cfg.tag_id} removed`
     }
 
@@ -428,19 +533,34 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         // Pick any member of the account. The existing implementation
         // only ever returned the automation's author; preserving that
         // shape until a real round-robin algorithm replaces it.
-        const { data: profiles } = await db
+        const { data: profiles, error } = await db
           .from('profiles')
           .select('user_id')
           .eq('account_id', args.automation.account_id)
           .limit(1)
+        if (error) throw new Error(`agent lookup failed: ${error.message}`)
         agentId = profiles?.[0]?.user_id
+      } else if (agentId) {
+        const { data: member, error } = await db
+          .from('profiles')
+          .select('user_id')
+          .eq('user_id', agentId)
+          .eq('account_id', args.automation.account_id)
+          .maybeSingle()
+        if (error) throw new Error(`agent lookup failed: ${error.message}`)
+        if (!member) throw new Error('assigned agent is not a member of this account')
       }
       if (!agentId) return 'no agent resolved'
-      await db
+      const { data: assigned, error: assignError } = await db
         .from('conversations')
         .update({ assigned_agent_id: agentId })
         .eq('account_id', args.automation.account_id)
         .eq('contact_id', args.contactId)
+        .select('id')
+        .maybeSingle()
+      if (assignError || !assigned) {
+        throw new Error(assignError?.message ?? 'assign conversation affected no row')
+      }
       return `assigned to ${agentId}`
     }
 
@@ -460,24 +580,26 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         }
         // Defense in depth: the service-role client bypasses RLS, so confirm
         // the field definition belongs to this account before writing.
-        const { data: field } = await db
+        const { data: field, error: fieldError } = await db
           .from('custom_fields')
           .select('id')
           .eq('id', customFieldId)
           .eq('account_id', args.automation.account_id)
           .maybeSingle()
+        if (fieldError) throw new Error(`custom field lookup failed: ${fieldError.message}`)
         if (!field) {
           return `field ${cfg.field} not writable from automations`
         }
         // Upsert on the table's UNIQUE(contact_id, custom_field_id) so repeated
         // runs overwrite rather than duplicate. Tenancy is enforced above and,
         // for the contact side, by the entry-point ownership guard.
-        await db
+        const { error } = await db
           .from('contact_custom_values')
           .upsert(
             { contact_id: args.contactId, custom_field_id: customFieldId, value },
             { onConflict: 'contact_id,custom_field_id' },
           )
+        if (error) throw new Error(`custom field update failed: ${error.message}`)
         return `custom field updated`
       }
 
@@ -488,28 +610,48 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       // Defense in depth: scope the service-role write to the account so
       // a future caller that skips the entry-point ownership guard still
       // cannot write across tenants.
-      await db
+      const { data: updated, error } = await db
         .from('contacts')
         .update({ [cfg.field]: value, updated_at: new Date().toISOString() })
         .eq('id', args.contactId)
         .eq('account_id', args.automation.account_id)
+        .select('id')
+        .maybeSingle()
+      if (error || !updated) throw new Error(error?.message ?? 'contact update affected no row')
       return `${cfg.field} updated`
     }
 
     case 'create_deal': {
       const cfg = step.step_config as CreateDealStepConfig
       if (!cfg.pipeline_id || !cfg.stage_id) throw new Error('create_deal needs pipeline + stage')
+      const { data: pipeline, error: pipelineError } = await db
+        .from('pipelines')
+        .select('id')
+        .eq('id', cfg.pipeline_id)
+        .eq('account_id', args.automation.account_id)
+        .maybeSingle()
+      if (pipelineError) throw new Error(`pipeline lookup failed: ${pipelineError.message}`)
+      if (!pipeline) throw new Error('pipeline is not in this account')
+      const { data: stage, error: stageError } = await db
+        .from('pipeline_stages')
+        .select('id')
+        .eq('id', cfg.stage_id)
+        .eq('pipeline_id', cfg.pipeline_id)
+        .maybeSingle()
+      if (stageError) throw new Error(`stage lookup failed: ${stageError.message}`)
+      if (!stage) throw new Error('stage is not in the selected pipeline')
       // Match the account's configured default currency rather than
       // the static `deals.currency` DB default — keeps automation-
       // created deals consistent with the one-currency-per-account
       // rule (issue #218). Fall back to USD if the row is somehow
       // missing the value (pre-021 forks).
-      const { data: acct } = await db
+      const { data: acct, error: accountError } = await db
         .from('accounts')
         .select('default_currency')
         .eq('id', args.automation.account_id)
         .maybeSingle()
-      await db.from('deals').insert({
+      if (accountError) throw new Error(`account lookup failed: ${accountError.message}`)
+      const { error: dealError } = await db.from('deals').insert({
         // Tenancy + audit, same split as automation_logs above.
         account_id: args.automation.account_id,
         user_id: args.automation.user_id,
@@ -521,6 +663,7 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         currency: acct?.default_currency ?? 'USD',
         status: 'open',
       })
+      if (dealError) throw new Error(`create deal failed: ${dealError.message}`)
       return 'deal created'
     }
 
@@ -528,22 +671,21 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       const cfg = step.step_config as SendWebhookStepConfig
       if (!cfg.url) throw new Error('send_webhook needs url')
       const body = cfg.body_template ? interpolate(cfg.body_template, args) : JSON.stringify(args.context)
-      const res = await fetch(cfg.url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...(cfg.headers ?? {}) },
-        body,
-      })
-      if (!res.ok) throw new Error(`webhook returned ${res.status}`)
-      return `webhook ${res.status}`
+      const status = await postJsonToPinnedPublicUrl(cfg.url, body, cfg.headers ?? {})
+      if (status < 200 || status >= 300) throw new Error(`webhook returned ${status}`)
+      return `webhook ${status}`
     }
 
     case 'close_conversation': {
       if (!args.contactId) throw new Error('close_conversation needs a contact')
-      await db
+      const { data: closed, error } = await db
         .from('conversations')
         .update({ status: 'closed', updated_at: new Date().toISOString() })
         .eq('account_id', args.automation.account_id)
         .eq('contact_id', args.contactId)
+        .select('id')
+        .maybeSingle()
+      if (error || !closed) throw new Error(error?.message ?? 'close conversation affected no row')
       return 'conversation closed'
     }
 
@@ -565,7 +707,18 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
  */
 async function resolveConversationId(args: ExecuteArgs): Promise<string> {
   const fromCtx = args.context.conversation_id
-  if (fromCtx) return fromCtx
+  if (fromCtx) {
+    let query = supabaseAdmin()
+      .from('conversations')
+      .select('id')
+      .eq('id', fromCtx)
+      .eq('account_id', args.automation.account_id)
+    if (args.contactId) query = query.eq('contact_id', args.contactId)
+    const { data, error } = await query.maybeSingle()
+    if (error) throw new Error(`conversation lookup failed: ${error.message}`)
+    if (!data?.id) throw new Error('conversation is not in this account/contact')
+    return data.id as string
+  }
   if (!args.contactId) throw new Error('cannot resolve conversation: no contact')
   const { data, error } = await supabaseAdmin()
     .from('conversations')
@@ -591,31 +744,49 @@ function triggerMatches(automation: Automation, ctx: AutomationContext | undefin
   })
 }
 
+async function assertTagInAccount(
+  db: ReturnType<typeof supabaseAdmin>,
+  tagId: string,
+  accountId: string,
+): Promise<void> {
+  const { data: tag, error } = await db
+    .from('tags')
+    .select('id')
+    .eq('id', tagId)
+    .eq('account_id', accountId)
+    .maybeSingle()
+  if (error) throw new Error(`tag lookup failed: ${error.message}`)
+  if (!tag) throw new Error('tag is not in this account')
+}
+
 async function evaluateCondition(cfg: ConditionStepConfig, args: ExecuteArgs): Promise<boolean> {
   const db = supabaseAdmin()
   switch (cfg.subject) {
     case 'tag_presence': {
       if (!args.contactId || !cfg.operand) return false
+      await assertTagInAccount(db, cfg.operand, args.automation.account_id)
       // contact_tags has no account_id column (its RLS keys off the parent
       // contact), so tenant scoping here relies on the contact-ownership
       // guard in runAutomationsForTrigger.
-      const { count } = await db
+      const { count, error } = await db
         .from('contact_tags')
         .select('id', { count: 'exact', head: true })
         .eq('contact_id', args.contactId)
         .eq('tag_id', cfg.operand)
+      if (error) throw new Error(`tag condition failed: ${error.message}`)
       return (count ?? 0) > 0
     }
     case 'contact_field': {
       if (!args.contactId || !cfg.operand) return false
       // Scope to the account so the condition can't be turned into a
       // cross-tenant read oracle via the service-role client.
-      const { data } = await db
+      const { data, error } = await db
         .from('contacts')
         .select(cfg.operand)
         .eq('id', args.contactId)
         .eq('account_id', args.automation.account_id)
         .maybeSingle()
+      if (error) throw new Error(`contact field condition failed: ${error.message}`)
       const v = (data as Record<string, unknown> | null)?.[cfg.operand]
       return v != null && String(v) === String(cfg.value ?? '')
     }
@@ -682,46 +853,69 @@ function interpolate(s: string, args: ExecuteArgs): string {
 }
 
 async function appendResults(
-  logId: string | null,
+  args: ExecuteArgs,
   newItems: AutomationLogStepResult[],
   status: 'success' | 'partial' | 'failed' | null,
   errorMessage: string | null,
 ) {
-  if (!logId) return
+  if (!args.logId) return
   const db = supabaseAdmin()
-  const { data: existing } = await db
+  const { data: existing, error: readError } = await db
     .from('automation_logs')
     .select('steps_executed, status')
-    .eq('id', logId)
-    .single()
+    .eq('id', args.logId)
+    .eq('account_id', args.automation.account_id)
+    .eq('automation_id', args.automation.id)
+    .maybeSingle()
+  if (readError || !existing) {
+    throw new Error(readError?.message ?? 'automation log is outside the execution scope')
+  }
   const merged = [
-    ...((existing?.steps_executed as AutomationLogStepResult[] | undefined) ?? []),
+    ...((existing.steps_executed as AutomationLogStepResult[] | undefined) ?? []),
     ...newItems,
   ]
   const update: Record<string, unknown> = { steps_executed: merged }
-  // Only overwrite status on the outermost scope — nested branches pass null.
-  if (status !== null) {
-    update.status = status
-  }
+  if (status !== null) update.status = status
   if (errorMessage) update.error_message = errorMessage
-  await db.from('automation_logs').update(update).eq('id', logId)
+  const { data: updated, error } = await db
+    .from('automation_logs')
+    .update(update)
+    .eq('id', args.logId)
+    .eq('account_id', args.automation.account_id)
+    .eq('automation_id', args.automation.id)
+    .select('id')
+    .maybeSingle()
+  if (error || !updated) throw new Error(error?.message ?? 'automation log update affected no row')
 }
 
 async function finalizeLog(
-  logId: string | null,
+  args: ExecuteArgs,
   status: 'success' | 'partial' | 'failed',
   errorMessage: string | null,
 ) {
-  if (!logId) return
-  await supabaseAdmin()
+  if (!args.logId) return
+  const { data, error } = await supabaseAdmin()
     .from('automation_logs')
     .update({ status, error_message: errorMessage })
-    .eq('id', logId)
+    .eq('id', args.logId)
+    .eq('account_id', args.automation.account_id)
+    .eq('automation_id', args.automation.id)
+    .select('id')
+    .maybeSingle()
+  if (error || !data) throw new Error(error?.message ?? 'automation log finalize affected no row')
 }
 
-async function markPending(id: string, status: 'done' | 'failed') {
-  await supabaseAdmin()
+async function markPending(pending: PendingExecution, status: 'done' | 'failed') {
+  const { data, error } = await supabaseAdmin()
     .from('automation_pending_executions')
     .update({ status })
-    .eq('id', id)
+    .eq('id', pending.id)
+    .eq('account_id', pending.account_id)
+    .eq('automation_id', pending.automation_id)
+    .eq('status', 'running')
+    .select('id')
+    .maybeSingle()
+  if (error || !data) {
+    throw new Error(error?.message ?? 'pending execution update affected no row')
+  }
 }

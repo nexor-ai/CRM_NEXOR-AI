@@ -53,6 +53,13 @@ import {
 const CATEGORIES = ['Marketing', 'Utility', 'Authentication'] as const;
 type HeaderFormat = 'none' | 'text' | 'image' | 'video' | 'document';
 const HEADER_FORMATS: HeaderFormat[] = ['none', 'text', 'image', 'video', 'document'];
+const HEADER_FORMAT_LABELS: Record<HeaderFormat, string> = {
+  none: 'Nenhum',
+  text: 'Texto',
+  image: 'Imagem',
+  video: 'Vídeo',
+  document: 'Documento',
+};
 
 const categoryColors: Record<string, string> = {
   Marketing: 'bg-purple-600/20 text-purple-400 border-purple-600/30',
@@ -195,7 +202,7 @@ export function TemplateManager() {
       setTemplates(data || []);
     } catch (err) {
       console.error('Failed to fetch templates:', err);
-      toast.error('Failed to load templates');
+      toast.error('Não foi possível carregar os modelos');
     } finally {
       setLoading(false);
     }
@@ -271,7 +278,7 @@ export function TemplateManager() {
       const data = await res.json();
       if (!res.ok) {
         throw new Error(
-          data?.error || `${isEdit ? 'Edit' : 'Submit'} failed (HTTP ${res.status})`,
+          data?.error || `Falha ao ${isEdit ? 'editar' : 'enviar'} (HTTP ${res.status})`,
         );
       }
       // Refresh first, then close — re-opening the dialog
@@ -280,18 +287,18 @@ export function TemplateManager() {
       toast.success(
         data.local_preset
           ? isEdit
-            ? 'Preset updated locally.'
-            : 'Preset created locally.'
+            ? 'Modelo atualizado localmente.'
+            : 'Modelo criado localmente.'
           : isEdit
-            ? 'Preset updated.'
-            : 'Preset created.',
+            ? 'Modelo atualizado.'
+            : 'Modelo criado.',
       );
       setDialogOpen(false);
       setForm(emptyForm);
       setEditingId(null);
     } catch (err) {
       console.error('Submit error:', err);
-      toast.error(err instanceof Error ? err.message : 'Failed to submit');
+      toast.error(err instanceof Error ? err.message : 'Não foi possível enviar');
     } finally {
       setSubmitting(false);
     }
@@ -304,12 +311,12 @@ export function TemplateManager() {
       const res = await fetch('/api/whatsapp/templates/sync', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data?.error || `Sync failed (HTTP ${res.status})`);
+        throw new Error(data?.error || `Falha na sincronização (HTTP ${res.status})`);
       }
       toast.success(
-        `${data.total} local preset${data.total === 1 ? '' : 's'}` +
+        `${data.total} modelo${data.total === 1 ? '' : 's'} local${data.total === 1 ? '' : 'is'}` +
           (data.inserted || data.updated
-            ? ` (${data.inserted} new, ${data.updated} updated)`
+            ? ` (${data.inserted} novo(s), ${data.updated} atualizado(s))`
             : ''),
       );
       if (Array.isArray(data.errors) && data.errors.length > 0) {
@@ -318,22 +325,22 @@ export function TemplateManager() {
             `${e.name} (${e.language})`,
         );
         const suffix =
-          data.errors.length > 3 ? `, +${data.errors.length - 3} more` : '';
-        toast.error(`Failed to sync: ${preview.join(', ')}${suffix}`);
+          data.errors.length > 3 ? `, +${data.errors.length - 3} outros` : '';
+        toast.error(`Falha ao sincronizar: ${preview.join(', ')}${suffix}`);
       }
       if (data.truncated) {
         // Use error (not warning) so the message survives long
         // enough to read — sonner's `warning` auto-dismisses on
         // the same short timer as `success`.
         toast.error(
-          'Synced the first 2000 templates only — your account has more. Sync again to continue, or contact support if this persists.',
+          'Foram sincronizados apenas os 2000 primeiros modelos — sua conta tem mais. Sincronize de novo para continuar, ou contate o suporte se persistir.',
           { duration: 10000 },
         );
       }
       await fetchTemplates(user.id);
     } catch (err) {
       console.error('Template sync error:', err);
-      toast.error(err instanceof Error ? err.message : 'Failed to sync templates');
+      toast.error(err instanceof Error ? err.message : 'Não foi possível sincronizar os modelos');
     } finally {
       setSyncing(false);
     }
@@ -352,14 +359,14 @@ export function TemplateManager() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data?.error || `Delete failed (HTTP ${res.status})`);
+        throw new Error(data?.error || `Falha ao excluir (HTTP ${res.status})`);
       }
-      toast.success('Template deleted');
+      toast.success('Modelo excluído');
       setTemplates((prev) => prev.filter((t) => t.id !== target.id));
       setTemplateToDelete(null);
     } catch (err) {
       console.error('Delete error:', err);
-      toast.error(err instanceof Error ? err.message : 'Failed to delete template');
+      toast.error(err instanceof Error ? err.message : 'Não foi possível excluir o modelo');
     } finally {
       setDeletingId(null);
     }
@@ -456,12 +463,12 @@ export function TemplateManager() {
 
   async function handleHeaderImageFile(file: File) {
     if (!['image/jpeg', 'image/png'].includes(file.type)) {
-      toast.error('Header image must be a JPEG or PNG.');
+      toast.error('A imagem do cabeçalho deve ser JPEG ou PNG.');
       return;
     }
     if (file.size > MEDIA_MAX_BYTES_BY_KIND.image) {
       toast.error(
-        `Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB.`,
+        `A imagem tem ${(file.size / 1024 / 1024).toFixed(1)} MB — o limite é 5 MB.`,
       );
       return;
     }
@@ -469,9 +476,9 @@ export function TemplateManager() {
     try {
       const { publicUrl } = await uploadAccountMedia('chat-media', file);
       setForm((f) => ({ ...f, header_media_url: publicUrl }));
-      toast.success('Image uploaded.');
+      toast.success('Imagem enviada.');
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Upload failed.');
+      toast.error(err instanceof Error ? err.message : 'Falha no envio.');
     } finally {
       setUploadingHeader(false);
     }
@@ -480,9 +487,9 @@ export function TemplateManager() {
   return (
     <section className="animate-in fade-in-50 space-y-4 duration-200">
       <SettingsPanelHead
-        title="Message templates"
+        title="Modelos de mensagem"
         description={
-          'Create local WhatsApp presets for Evolution. No external approval or sync is required.'
+          'Crie modelos locais de WhatsApp para a Evolution. Nenhuma aprovação ou sincronização externa é necessária.'
         }
         action={
           <div className="flex items-center gap-2">
@@ -490,14 +497,14 @@ export function TemplateManager() {
               variant="outline"
               onClick={handleRefreshPresets}
               disabled={syncing}
-              title="Refresh local Evolution template presets"
+              title="Atualizar os modelos locais da Evolution"
             >
               <RefreshCw className={`size-4 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing…' : 'Refresh presets'}
+              {syncing ? 'Sincronizando…' : 'Atualizar modelos'}
             </Button>
             <Button onClick={openCreate}>
               <Plus className="size-4" />
-              New Template
+              Novo modelo
             </Button>
           </div>
         }
@@ -506,9 +513,9 @@ export function TemplateManager() {
       {templates.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-            <p className="text-muted-foreground text-sm">No templates yet.</p>
+            <p className="text-muted-foreground text-sm">Nenhum modelo ainda.</p>
             <p className="text-muted-foreground text-xs mt-1">
-              Create your first message template to get started.
+              Crie seu primeiro modelo de mensagem para começar.
             </p>
           </CardContent>
         </Card>
@@ -527,7 +534,7 @@ export function TemplateManager() {
                         {template.category}
                       </Badge>
                       <Badge className="text-xs border bg-primary/20 text-primary border-primary/30">
-                        Active
+                        Ativo
                       </Badge>
                       {template.language && (
                         <span className="text-xs text-muted-foreground uppercase">
@@ -543,7 +550,7 @@ export function TemplateManager() {
                                 ? 'text-yellow-400'
                                 : 'text-red-400'
                           }`}
-                          title="Local preset (no quality score on Evolution)"
+                          title="Modelo local (sem pontuação de qualidade na Evolution)"
                         >
                           {template.quality_score}
                         </span>
@@ -571,20 +578,20 @@ export function TemplateManager() {
                       variant="ghost"
                       size="sm"
                       onClick={() => openEdit(template)}
-                      title="Local presets are always editable. No external review on Evolution."
-                      aria-label="Edit template"
+                      title="Modelos locais são sempre editáveis. Sem revisão externa na Evolution."
+                      aria-label="Editar modelo"
                       className="text-muted-foreground hover:text-primary hover:bg-primary/10 h-8 px-2"
                     >
                       <Pencil className="size-3.5" />
-                      Edit
+                      Editar
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon"
                       onClick={() => setTemplateToDelete(template)}
                       disabled={deletingId === template.id}
-                      aria-label="Delete preset (local only)"
-                      title="Delete local preset"
+                      aria-label="Excluir modelo (apenas local)"
+                      title="Excluir modelo local"
                       className="text-muted-foreground hover:text-red-400 hover:bg-red-950/30 h-8 w-8"
                     >
                       {deletingId === template.id ? (
@@ -614,12 +621,12 @@ export function TemplateManager() {
         <DialogContent className="bg-popover border-border sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-popover-foreground">
-              {editingId ? 'Edit Message Template' : 'New Message Template'}
+              {editingId ? 'Editar modelo de mensagem' : 'Novo modelo de mensagem'}
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
               {editingId
-                ? 'Save your changes. Evolution uses presets immediately, no approval step.'
-                : 'Build a local preset for Evolution. Once saved, you can use it in broadcasts and the inbox.'}
+                ? 'Salve suas alterações. A Evolution usa os modelos imediatamente, sem etapa de aprovação.'
+                : 'Monte um modelo local para a Evolution. Depois de salvo, você pode usá-lo em disparos e na caixa de entrada.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -627,18 +634,18 @@ export function TemplateManager() {
             <div className="flex items-start gap-2 rounded border border-amber-700/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
               <AlertCircle className="size-4 mt-0.5 shrink-0" />
               <p>
-                AUTHENTICATION presets have a fixed body + OTP button shape
-                that needs a dedicated local builder. For now, use Utility or
-                Marketing presets with Evolution.
+                Modelos de AUTHENTICATION têm um corpo fixo + botão de OTP
+                que precisa de um construtor local dedicado. Por ora, use modelos
+                de Utility ou Marketing com a Evolution.
               </p>
             </div>
           )}
 
           <div className="space-y-4 py-2">
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Template Name</Label>
+              <Label className="text-muted-foreground">Nome do modelo</Label>
               <Input
-                placeholder="e.g. order_confirmation"
+                placeholder="ex.: confirmacao_pedido"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 disabled={editingId !== null}
@@ -646,14 +653,14 @@ export function TemplateManager() {
               />
               <p className="text-[11px] text-muted-foreground">
                 {editingId
-                  ? 'Name is fixed once a local preset exists — create a new preset to change it.'
-                  : 'Lowercase letters, digits, and underscores only.'}
+                  ? 'O nome é fixo depois que o modelo local existe — crie um novo modelo para alterá-lo.'
+                  : 'Apenas letras minúsculas, dígitos e sublinhados.'}
               </p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label className="text-muted-foreground">Category</Label>
+                <Label className="text-muted-foreground">Categoria</Label>
                 <Select
                   value={form.category}
                   onValueChange={(val) =>
@@ -681,7 +688,7 @@ export function TemplateManager() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-muted-foreground">Language</Label>
+                <Label className="text-muted-foreground">Idioma</Label>
                 <Input
                   list="template-language-codes"
                   placeholder="en_US"
@@ -699,11 +706,11 @@ export function TemplateManager() {
                 </datalist>
                 <p className="text-[11px] text-muted-foreground">
                   {editingId
-                    ? 'Language is fixed once a local preset exists.'
+                    ? 'O idioma é fixo depois que o modelo local existe.'
                     : (
                         <>
-                          Language code, e.g. <code>en_US</code>{' '}
-                          or <code>pt_BR</code>.
+                          Código do idioma, ex.: <code>en_US</code>{' '}
+                          ou <code>pt_BR</code>.
                         </>
                       )}
                 </p>
@@ -711,7 +718,7 @@ export function TemplateManager() {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Header</Label>
+              <Label className="text-muted-foreground">Cabeçalho</Label>
               <Select
                 value={form.header_format}
                 onValueChange={(val) =>
@@ -737,9 +744,7 @@ export function TemplateManager() {
                       value={type}
                       className="text-popover-foreground focus:bg-muted focus:text-popover-foreground"
                     >
-                      {type === 'none'
-                        ? 'None'
-                        : type.charAt(0).toUpperCase() + type.slice(1)}
+                      {HEADER_FORMAT_LABELS[type]}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -749,8 +754,8 @@ export function TemplateManager() {
                 <div className="space-y-2 mt-2">
                   <Input
                     id="template-header-text"
-                    aria-label="Header text"
-                    placeholder="Header text (max 60 chars, optional {{1}})"
+                    aria-label="Texto do cabeçalho"
+                    placeholder="Texto do cabeçalho (máx. 60 caracteres, {{1}} opcional)"
                     value={form.header_content}
                     onChange={(e) =>
                       setForm({ ...form, header_content: e.target.value })
@@ -761,8 +766,8 @@ export function TemplateManager() {
                   {headerVarCount > 0 && (
                     <Input
                       id="template-header-sample"
-                      aria-label="Sample value for header variable"
-                      placeholder="Sample value for {{1}}"
+                      aria-label="Valor de exemplo para a variável do cabeçalho"
+                      placeholder="Valor de exemplo para {{1}}"
                       value={form.header_sample}
                       onChange={(e) =>
                         setForm({ ...form, header_sample: e.target.value })
@@ -800,15 +805,15 @@ export function TemplateManager() {
                         ) : (
                           <Upload className="h-3.5 w-3.5" />
                         )}
-                        Upload image
+                        Enviar imagem
                       </Button>
                       <span className="text-[11px] text-muted-foreground">
-                        JPEG or PNG, ≤5 MB
+                        JPEG ou PNG, ≤5 MB
                       </span>
                     </div>
                   )}
                   <Input
-                    placeholder={`https://… (or paste a public ${form.header_format} link)`}
+                    placeholder={`https://… (ou cole um link público de ${form.header_format})`}
                     value={form.header_media_url}
                     onChange={(e) =>
                       setForm({ ...form, header_media_url: e.target.value })
@@ -825,21 +830,21 @@ export function TemplateManager() {
                   )}
                   <p className="text-[11px] text-muted-foreground leading-relaxed">
                     {form.header_format === 'image'
-                      ? 'Upload a JPEG/PNG (≤5 MB, ≥800×418 px recommended) or paste a public HTTPS link — Evolution fetches the URL each time the preset is sent.'
-                      : 'Must be a publicly accessible HTTPS link. Evolution fetches it each time the preset is sent, so it needs to stay live.'}
+                      ? 'Envie um JPEG/PNG (≤5 MB, ≥800×418 px recomendado) ou cole um link HTTPS público — a Evolution busca a URL cada vez que o modelo é enviado.'
+                      : 'Deve ser um link HTTPS de acesso público. A Evolution o busca cada vez que o modelo é enviado, então precisa continuar disponível.'}
                     {form.header_format === 'video' &&
-                      ' Recommended: MP4 / 3GPP, ≤16 MB, ≤60 seconds.'}
+                      ' Recomendado: MP4 / 3GPP, ≤16 MB, ≤60 segundos.'}
                     {form.header_format === 'document' &&
-                      ' Recommended: PDF, ≤100 MB.'}
+                      ' Recomendado: PDF, ≤100 MB.'}
                   </p>
                 </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Body Text</Label>
+              <Label className="text-muted-foreground">Texto do corpo</Label>
               <Textarea
-                placeholder="Hello {{1}}, your order {{2}} is confirmed."
+                placeholder="Olá {{1}}, seu pedido {{2}} está confirmado."
                 value={form.body_text}
                 onChange={(e) =>
                   setForm({ ...form, body_text: e.target.value })
@@ -849,14 +854,14 @@ export function TemplateManager() {
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground resize-none"
               />
               <p className="text-[11px] text-muted-foreground">
-                Use {`{{1}}`}, {`{{2}}`} for variables (must be contiguous
-                starting at {`{{1}}`}).
+                Use {`{{1}}`}, {`{{2}}`} para variáveis (devem ser contíguas
+                começando em {`{{1}}`}).
               </p>
 
               {bodyVarCount > 0 && (
                 <div className="space-y-1.5 pt-1">
                   <Label className="text-[11px] text-muted-foreground">
-                    Sample values (optional — help you preview the preset)
+                    Valores de exemplo (opcional — ajudam a pré-visualizar o modelo)
                   </Label>
                   {form.body_samples.map((val, i) => {
                     const inputId = `template-body-sample-${i}`;
@@ -864,8 +869,8 @@ export function TemplateManager() {
                       <Input
                         key={i}
                         id={inputId}
-                        aria-label={`Sample value for body variable {{${i + 1}}}`}
-                        placeholder={`Sample for {{${i + 1}}}`}
+                        aria-label={`Valor de exemplo para a variável do corpo {{${i + 1}}}`}
+                        placeholder={`Exemplo para {{${i + 1}}}`}
                         value={val}
                         onChange={(e) => {
                           const next = [...form.body_samples];
@@ -881,9 +886,9 @@ export function TemplateManager() {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Footer (optional)</Label>
+              <Label className="text-muted-foreground">Rodapé (opcional)</Label>
               <Input
-                placeholder="Optional footer text (max 60 chars)"
+                placeholder="Texto do rodapé opcional (máx. 60 caracteres)"
                 value={form.footer_text}
                 onChange={(e) =>
                   setForm({ ...form, footer_text: e.target.value })
@@ -895,7 +900,7 @@ export function TemplateManager() {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label className="text-muted-foreground">Buttons (optional)</Label>
+                <Label className="text-muted-foreground">Botões (opcional)</Label>
                 <Button
                   type="button"
                   variant="outline"
@@ -905,13 +910,13 @@ export function TemplateManager() {
                   className="border-border bg-transparent text-muted-foreground hover:bg-muted h-7 text-xs"
                 >
                   <Plus className="size-3" />
-                  Add Button
+                  Adicionar botão
                 </Button>
               </div>
               {form.buttons.length === 0 ? (
                 <p className="text-[11px] text-muted-foreground">
-                  Up to {TEMPLATE_LIMITS.maxButtonsTotal} buttons. QUICK_REPLY
-                  buttons must come before URL / phone / copy-code buttons.
+                  Até {TEMPLATE_LIMITS.maxButtonsTotal} botões. Os botões QUICK_REPLY
+                  devem vir antes dos botões de URL / telefone / copiar código.
                 </p>
               ) : (
                 <div className="space-y-2">
@@ -939,7 +944,7 @@ export function TemplateManager() {
                               value="QUICK_REPLY"
                               className="text-popover-foreground focus:bg-muted focus:text-popover-foreground"
                             >
-                              Quick Reply
+                              Resposta rápida
                             </SelectItem>
                             <SelectItem
                               value="URL"
@@ -951,18 +956,18 @@ export function TemplateManager() {
                               value="PHONE_NUMBER"
                               className="text-popover-foreground focus:bg-muted focus:text-popover-foreground"
                             >
-                              Phone
+                              Telefone
                             </SelectItem>
                             <SelectItem
                               value="COPY_CODE"
                               className="text-popover-foreground focus:bg-muted focus:text-popover-foreground"
                             >
-                              Copy Code
+                              Copiar código
                             </SelectItem>
                           </SelectContent>
                         </Select>
                         <Input
-                          placeholder="Button label"
+                          placeholder="Rótulo do botão"
                           value={btn.text}
                           maxLength={TEMPLATE_LIMITS.buttonTextMaxLength}
                           onChange={(e) =>
@@ -983,7 +988,7 @@ export function TemplateManager() {
                       {btn.type === 'URL' && (
                         <div className="space-y-1 pl-1">
                           <Input
-                            placeholder="https://example.com/path or with {{1}} suffix"
+                            placeholder="https://exemplo.com/caminho ou com sufixo {{1}}"
                             value={btn.url}
                             onChange={(e) =>
                               updateButton(i, { url: e.target.value })
@@ -992,7 +997,7 @@ export function TemplateManager() {
                           />
                           {extractVariableIndices(btn.url).length > 0 && (
                             <Input
-                              placeholder="Example value for {{1}} (required when URL has a variable)"
+                              placeholder="Valor de exemplo para {{1}} (obrigatório quando a URL tem variável)"
                               value={btn.example ?? ''}
                               onChange={(e) =>
                                 updateButton(i, { example: e.target.value })
@@ -1014,7 +1019,7 @@ export function TemplateManager() {
                       )}
                       {btn.type === 'COPY_CODE' && (
                         <Input
-                          placeholder="Example code (e.g. SUMMER20)"
+                          placeholder="Código de exemplo (ex.: VERAO20)"
                           value={btn.example}
                           onChange={(e) =>
                             updateButton(i, { example: e.target.value })
@@ -1035,7 +1040,7 @@ export function TemplateManager() {
               onClick={() => setDialogOpen(false)}
               className="border-border text-muted-foreground hover:bg-muted"
             >
-              Cancel
+              Cancelar
             </Button>
             <Button
               onClick={handleSubmit}
@@ -1045,12 +1050,12 @@ export function TemplateManager() {
               {submitting ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
-                  {editingId ? 'Saving…' : 'Submitting…'}
+                  {editingId ? 'Salvando…' : 'Enviando…'}
                 </>
               ) : editingId ? (
-                'Save Changes'
+                'Salvar alterações'
               ) : (
-                'Save Preset'
+                'Salvar modelo'
               )}
             </Button>
           </DialogFooter>
@@ -1067,9 +1072,9 @@ export function TemplateManager() {
       >
         <DialogContent className="bg-popover border-border sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-popover-foreground">Delete preset?</DialogTitle>
+            <DialogTitle className="text-popover-foreground">Excluir modelo?</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              {`"${templateToDelete?.name}" will be permanently deleted. Active broadcasts using this preset will start failing on their next send. This can't be undone.`}
+              {`"${templateToDelete?.name}" será excluído permanentemente. Disparos ativos que usam este modelo passarão a falhar no próximo envio. Isso não pode ser desfeito.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="bg-popover border-border">
@@ -1079,7 +1084,7 @@ export function TemplateManager() {
               disabled={deletingId !== null}
               className="border-border text-muted-foreground hover:bg-muted"
             >
-              Cancel
+              Cancelar
             </Button>
             <Button
               onClick={confirmDelete}
@@ -1089,10 +1094,10 @@ export function TemplateManager() {
               {deletingId !== null ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
-                  Deleting…
+                  Excluindo…
                 </>
               ) : (
-                'Delete'
+                'Excluir'
               )}
             </Button>
           </DialogFooter>

@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const h = vi.hoisted(() => ({
   state: {
     owned: null as { id: string } | null,
+    ownedConversation: null as { id: string } | null,
     ownedCustomField: null as { id: string } | null,
     automations: [] as Record<string, unknown>[],
     steps: [] as Record<string, unknown>[],
@@ -27,11 +28,12 @@ vi.mock("./admin-client", () => {
     if (table === "contacts") {
       if (type === "update") {
         state.updateCalls.push({ table, filters: ops.filters });
-        return { data: null, error: null };
+        return { data: { id: "c1" }, error: null };
       }
       // ownership guard / condition read
       return { data: state.owned, error: null };
     }
+    if (table === "conversations") return { data: state.ownedConversation, error: null };
     if (table === "custom_fields") {
       // account-scoped ownership lookup for a custom field definition
       return { data: state.ownedCustomField, error: null };
@@ -46,7 +48,7 @@ vi.mock("./admin-client", () => {
     if (table === "automations") return { data: state.automations, error: null };
     if (table === "automation_logs") {
       if (type === "insert") return { data: { id: "log1" }, error: null };
-      if (type === "update") return { data: null, error: null };
+      if (type === "update") return { data: { id: "log1" }, error: null };
       return { data: { steps_executed: [], status: "success" }, error: null };
     }
     if (table === "automation_steps") return { data: state.steps, error: null };
@@ -101,6 +103,7 @@ const ACCOUNT = "acct-1";
 
 beforeEach(() => {
   h.state.owned = null;
+  h.state.ownedConversation = null;
   h.state.ownedCustomField = null;
   h.state.automations = [];
   h.state.steps = [];
@@ -142,6 +145,22 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
     });
 
     expect(h.state.fromCalls).toContain("automations");
+  });
+
+  it("refuses a foreign conversation before loading automations", async () => {
+    h.state.owned = { id: "c1" };
+    h.state.ownedConversation = null;
+    h.state.automations = [automationWithUpdateStep()];
+
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "new_message_received",
+      contactId: "c1",
+      context: { conversation_id: "foreign-conversation" },
+    });
+
+    expect(h.state.fromCalls).toContain("conversations");
+    expect(h.state.fromCalls).not.toContain("automations");
   });
 
   it("scopes the update_contact_field write to the automation's account", async () => {
@@ -221,6 +240,33 @@ describe("update_contact_field — custom fields", () => {
 
     expect(h.state.upsertCalls).toHaveLength(0);
     expect(h.state.updateCalls).toHaveLength(0);
+  });
+});
+
+describe("send_webhook — SSRF protection", () => {
+  it("refuses a private target without opening a network connection", async () => {
+    h.state.owned = { id: "c1" };
+    h.state.automations = [automationWithUpdateStep()];
+    h.state.steps = [{
+      id: "s-webhook",
+      automation_id: "a1",
+      step_type: "send_webhook",
+      position: 0,
+      parent_step_id: null,
+      step_config: { url: "http://169.254.169.254/latest/meta-data" },
+    }];
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "new_message_received",
+      contactId: "c1",
+      context: {},
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });
 

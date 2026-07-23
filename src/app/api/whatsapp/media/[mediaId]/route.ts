@@ -9,7 +9,7 @@ export async function GET(
   // webhooks can include media as URL/base64; the webhook stores that value on
   // messages.media_url directly. This route remains as a compatibility guard.
   return NextResponse.json(
-    { error: 'Evolution API does not expose Graph-style media lookup. Use the stored message media_url.', mediaId },
+    { error: 'A API Evolution não expõe busca de mídia estilo Graph. Use o media_url armazenado da mensagem.', mediaId },
     { status: 410 }
   )
 }

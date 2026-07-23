@@ -46,6 +46,12 @@ def load_env(path: Path) -> None:
 def main() -> int:
     load_env(ENV_PATH)
     os.environ["PATH"] = f"{NODE_BIN}:{os.environ.get('PATH', '')}"
+    os.environ.setdefault("NEXT_DIST_DIR", ".next-production")
+    build_id = PROJECT_DIR / os.environ["NEXT_DIST_DIR"] / "BUILD_ID"
+    if not build_id.is_file():
+        raise SystemExit(
+            f"Production build not found: {build_id}. Run scripts/promote-wacrm-production.py first."
+        )
     cmd = ["npm", "run", "start", "--", "-p", PORT, "-H", HOST]
     return subprocess.call(cmd, cwd=PROJECT_DIR)
 

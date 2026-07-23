@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { isPrivateOrReservedIp, isDeliverableUrl } from './ssrf';
 
 describe('isPrivateOrReservedIp', () => {
-  it('flags loopback / private / link-local / CGNAT IPv4', () => {
+  it('flags loopback / private / link-local / CGNAT / reserved IPv4', () => {
     for (const ip of [
       '127.0.0.1',
       '10.0.0.5',
@@ -12,6 +12,9 @@ describe('isPrivateOrReservedIp', () => {
       '169.254.169.254', // cloud metadata
       '100.64.0.1', // CGNAT
       '0.0.0.0',
+      '198.18.0.1',
+      '224.0.0.1',
+      '240.0.0.1',
     ]) {
       expect(isPrivateOrReservedIp(ip)).toBe(true);
     }
@@ -24,7 +27,17 @@ describe('isPrivateOrReservedIp', () => {
   });
 
   it('flags loopback / ULA / link-local IPv6 and IPv4-mapped privates', () => {
-    for (const ip of ['::1', 'fe80::1', 'fc00::1', 'fd12::34', '::ffff:127.0.0.1']) {
+    for (const ip of [
+      '::1',
+      'fe80::1',
+      'fc00::1',
+      'fd12::34',
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '::ffff:a9fe:a9fe',
+      'ff02::1',
+      '2001:db8::1',
+    ]) {
       expect(isPrivateOrReservedIp(ip)).toBe(true);
     }
     expect(isPrivateOrReservedIp('2606:4700:4700::1111')).toBe(false);

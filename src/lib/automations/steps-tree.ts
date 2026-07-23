@@ -18,7 +18,7 @@ export interface BuilderStepInput {
   parent_index?: number | null
 }
 
-interface InsertRow {
+export interface InsertRow {
   id: string
   automation_id: string
   parent_step_id: string | null
@@ -52,6 +52,18 @@ export async function insertSteps(
 ): Promise<string | null> {
   if (!input || input.length === 0) return null
 
+  const rows = buildStepRows(automationId, input)
+  if (rows.length === 0) return null
+  const { error } = await supabaseAdmin().from('automation_steps').insert(rows)
+  return error?.message ?? null
+}
+
+export function buildStepRows(
+  automationId: string,
+  input: BuilderStepInput[],
+): InsertRow[] {
+  if (!input || input.length === 0) return []
+
   const looksFlat = input.some(
     (s) => s.branch !== undefined || s.parent_index !== undefined,
   )
@@ -64,7 +76,9 @@ export async function insertSteps(
     branch: 'yes' | 'no' | null,
   ) {
     steps.forEach((s, idx) => {
-      const id = s.id ?? uid()
+      // Browser-provided UUIDs are not trusted. Generate every persisted
+      // step id server-side, then use that id for branch parent references.
+      const id = uid()
       rows.push({
         id,
         automation_id: automationId,
@@ -81,10 +95,7 @@ export async function insertSteps(
     })
   }
   walk(tree, null, null)
-
-  if (rows.length === 0) return null
-  const { error } = await supabaseAdmin().from('automation_steps').insert(rows)
-  return error?.message ?? null
+  return rows
 }
 
 function seedsToTree(seeds: BuilderStepInput[]): BuilderStepInput[] {

@@ -154,7 +154,7 @@ export function WhatsAppConfig() {
       }
     } catch (err) {
       console.error('fetchConfig error:', err);
-      toast.error('Failed to load WhatsApp configuration');
+      toast.error('Não foi possível carregar a configuração do WhatsApp');
     } finally {
       setLoading(false);
     }
@@ -179,11 +179,11 @@ export function WhatsAppConfig() {
 
   async function handleSave() {
     if (!evolutionBaseUrl.trim()) {
-      toast.error('Evolution API Base URL is required');
+      toast.error('A URL base da API Evolution é obrigatória');
       return;
     }
     if (!evolutionInstance.trim()) {
-      toast.error('Evolution instance name is required');
+      toast.error('O nome da instância Evolution é obrigatório');
       return;
     }
 
@@ -212,7 +212,7 @@ export function WhatsAppConfig() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || 'Failed to save configuration');
+        toast.error(data.error || 'Não foi possível salvar a configuração');
         setSaving(false);
         return;
       }
@@ -226,17 +226,17 @@ export function WhatsAppConfig() {
         // open yet, keep the UI honest and show the QR payload instead of
         // claiming the number is live.
         toast.success(
-          'Credentials saved. Scan the QR/pairing payload below if the instance is not open yet.',
+          'Credenciais salvas. Escaneie o QR/código de pareamento abaixo se a instância ainda não estiver aberta.',
           { duration: 10000 },
         );
         setQrCode(toQrImageSrc(data.qrcode?.base64 || data.qrcode?.code || null));
       } else {
         toast.success(
           data.phone_info?.verified_name
-            ? `Live — ${data.phone_info.verified_name} can now receive events.`
+            ? `Ativo — ${data.phone_info.verified_name} já pode receber eventos.`
             : data.connection_state === 'open'
-              ? 'WhatsApp already connected. Events will start flowing within a minute.'
-              : 'Evolution instance saved. Scan the QR/pairing payload to finish connecting WhatsApp.',
+              ? 'WhatsApp já conectado. Os eventos começarão a chegar em até um minuto.'
+              : 'Instância Evolution salva. Escaneie o QR/código de pareamento para concluir a conexão do WhatsApp.',
         );
         // Preserve the QR/pairing payload returned by Evolution so the user
         // can finish the connection from this screen.
@@ -246,7 +246,7 @@ export function WhatsAppConfig() {
       if (accountId) await fetchConfig(accountId);
     } catch (err) {
       console.error('Save error:', err);
-      toast.error('Failed to save configuration');
+      toast.error('Não foi possível salvar a configuração');
     } finally {
       setSaving(false);
     }
@@ -264,19 +264,19 @@ export function WhatsAppConfig() {
         setStatusMessage('');
         toast.success(
           payload.phone_info?.verified_name
-            ? `Connected to ${payload.phone_info.verified_name}`
-            : 'API connection successful'
+            ? `Conectado a ${payload.phone_info.verified_name}`
+            : 'Conexão com a API bem-sucedida'
         );
       } else {
         setConnectionStatus('disconnected');
         setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'evolution_api_error' ? 'evolution_api_error' : null);
         setStatusMessage(payload.message || '');
-        toast.error(payload.message || 'API connection failed');
+        toast.error(payload.message || 'Falha na conexão com a API');
       }
     } catch (err) {
       console.error('Test connection error:', err);
       setConnectionStatus('disconnected');
-      toast.error('Connection test failed. Check network and try again.');
+      toast.error('Falha no teste de conexão. Verifique a rede e tente de novo.');
     } finally {
       setTesting(false);
     }
@@ -289,15 +289,15 @@ export function WhatsAppConfig() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || 'Failed to refresh QR code');
+        toast.error(data.error || 'Não foi possível atualizar o QR code');
         return;
       }
 
       setQrCode(toQrImageSrc(data.qrcode?.base64 || data.qrcode?.code || null));
-      toast.success('QR/pairing payload refreshed. Scan it before it expires.');
+      toast.success('QR/código de pareamento atualizado. Escaneie antes que expire.');
     } catch (err) {
       console.error('Refresh QR error:', err);
-      toast.error('Failed to refresh QR code');
+      toast.error('Não foi possível atualizar o QR code');
     } finally {
       setRefreshingQr(false);
     }
@@ -313,24 +313,24 @@ export function WhatsAppConfig() {
       const data = (await res.json()) as RegistrationProbe;
       setRegistrationProbe(data);
       if (data.live) {
-        toast.success('Number is fully wired — Evolution is delivering events.');
+        toast.success('Número totalmente conectado — a Evolution está entregando os eventos.');
       } else {
         toast.error(
-          'Evolution instance is not open yet. Save the configuration again to refresh the QR/pairing payload.',
+          'A instância Evolution ainda não está aberta. Salve a configuração de novo para atualizar o QR/código de pareamento.',
           { duration: 8000 },
         );
       }
       if (accountId) await fetchConfig(accountId);
     } catch (err) {
       console.error('verify-registration failed:', err);
-      toast.error('Could not reach the verification endpoint.');
+      toast.error('Não foi possível acessar o endpoint de verificação.');
     } finally {
       setVerifyingRegistration(false);
     }
   }
 
   async function handleReset() {
-    if (!confirm('This will delete the current WhatsApp config so you can re-enter it. Continue?')) {
+    if (!confirm('Isso vai excluir a configuração atual do WhatsApp para você inseri-la de novo. Continuar?')) {
       return;
     }
 
@@ -340,11 +340,11 @@ export function WhatsAppConfig() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || 'Failed to reset configuration');
+        toast.error(data.error || 'Não foi possível redefinir a configuração');
         return;
       }
 
-      toast.success('Configuration cleared. You can now re-enter your credentials.');
+      toast.success('Configuração limpa. Agora você pode inserir suas credenciais de novo.');
       setConfig(null);
       setEvolutionBaseUrl('');
       setEvolutionInstance('');
@@ -356,7 +356,7 @@ export function WhatsAppConfig() {
       setStatusMessage('');
     } catch (err) {
       console.error('Reset error:', err);
-      toast.error('Failed to reset configuration');
+      toast.error('Não foi possível redefinir a configuração');
     } finally {
       setResetting(false);
     }
@@ -366,8 +366,8 @@ export function WhatsAppConfig() {
     return (
       <section className="animate-in fade-in-50 duration-200">
         <SettingsPanelHead
-          title="WhatsApp connection"
-          description="Connect your Evolution WhatsApp Business API. Credentials, webhook, and setup steps all live here."
+          title="Conexão do WhatsApp"
+          description="Conecte sua API Evolution do WhatsApp Business. Credenciais, webhook e passos de configuração ficam todos aqui."
         />
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-6 animate-sqrCode text-primary" />
@@ -381,8 +381,8 @@ export function WhatsAppConfig() {
   return (
     <section className="animate-in fade-in-50 duration-200">
       <SettingsPanelHead
-        title="WhatsApp connection"
-        description="Connect your Evolution WhatsApp Business API. Credentials, webhook, and setup steps all live here."
+        title="Conexão do WhatsApp"
+        description="Conecte sua API Evolution do WhatsApp Business. Credenciais, webhook e passos de configuração ficam todos aqui."
       />
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
@@ -394,7 +394,7 @@ export function WhatsAppConfig() {
               <AlertTriangle className="size-5 text-amber-400 mt-0.5 shrink-0" />
               <div className="flex-1">
                 <AlertTitle className="text-amber-200 mb-1">
-                  Stored token can&apos;t be decrypted
+                  Não foi possível descriptografar o token armazenado
                 </AlertTitle>
                 <AlertDescription className="text-amber-100/80 text-sm">
                   {statusMessage}
@@ -408,12 +408,12 @@ export function WhatsAppConfig() {
                   {resetting ? (
                     <>
                       <Loader2 className="size-4 animate-sqrCode" />
-                      Resetting...
+                      Redefinindo...
                     </>
                   ) : (
                     <>
                       <RotateCcw className="size-4" />
-                      Reset Configuration
+                      Redefinir configuração
                     </>
                   )}
                 </Button>
@@ -431,14 +431,14 @@ export function WhatsAppConfig() {
               <XCircle className="size-4 text-red-500" />
             )}
             <AlertTitle className="text-foreground mb-0">
-              {connectionStatus === 'connected' ? 'Instance connected' : 'Not connected'}
+              {connectionStatus === 'connected' ? 'Instância conectada' : 'Não conectada'}
             </AlertTitle>
           </div>
           <AlertDescription className="text-muted-foreground">
             {connectionStatus === 'connected'
-              ? 'Evolution reports this WhatsApp instance as open. Webhook events are configured per instance.'
+              ? 'A Evolution reporta esta instância do WhatsApp como aberta. Os eventos de webhook são configurados por instância.'
               : statusMessage ||
-                'Configure your Evolution API credentials below to connect your WhatsApp Business account.'}
+                'Configure suas credenciais da API Evolution abaixo para conectar sua conta do WhatsApp Business.'}
           </AlertDescription>
         </Alert>
 
@@ -466,8 +466,8 @@ export function WhatsAppConfig() {
                   }
                 >
                   {isRegistered
-                    ? 'Instance open — Evolution will deliver events to WACRM'
-                    : 'Instance not open — scan QR/pairing payload'}
+                    ? 'Instância aberta — a Evolution entregará os eventos ao CRM'
+                    : 'Instância não aberta — escaneie o QR/código de pareamento'}
                 </AlertTitle>
               </div>
               <Button
@@ -482,17 +482,17 @@ export function WhatsAppConfig() {
                 ) : (
                   <Zap className="size-3.5" />
                 )}
-                Check QR connection
+                Verificar conexão do QR
               </Button>
             </div>
             <AlertDescription className="text-muted-foreground mt-2 text-xs leading-relaxed">
               {isRegistered ? (
                 <>
-                  Evolution connection state is <strong>open</strong>. Click <strong>Check QR connection</strong> if the connection state changes or events stop arriving.
+                  O estado de conexão da Evolution é <strong>aberto</strong>. Clique em <strong>Verificar conexão do QR</strong> se o estado mudar ou os eventos pararem de chegar.
                 </>
               ) : (
                 <>
-                  Evolution uses QR pairing instead of Meta registration/PIN. Click Save Configuration to create/connect the instance and display the QR payload.
+                  A Evolution usa pareamento por QR em vez de registro/PIN da Meta. Clique em Salvar configuração para criar/conectar a instância e exibir o QR.
                 </>
               )}
             </AlertDescription>
@@ -500,9 +500,9 @@ export function WhatsAppConfig() {
             {registrationProbe && (
               <div className="mt-3 rounded border border-border bg-card/60 px-3 py-2 space-y-1.5 text-[11px]">
                 <p className="font-medium text-foreground">
-                  Diagnostic — last run: {' '}
+                  Diagnóstico — última execução: {' '}
                   <span className={registrationProbe.live ? 'text-emerald-400' : 'text-amber-400'}>
-                    {registrationProbe.live ? 'live' : 'not live'}
+                    {registrationProbe.live ? 'ativo' : 'inativo'}
                   </span>
                 </p>
                 <ul className="space-y-0.5 text-muted-foreground">
@@ -534,16 +534,16 @@ export function WhatsAppConfig() {
         {/* API Credentials */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-foreground">API Credentials</CardTitle>
+            <CardTitle className="text-foreground">Credenciais da API</CardTitle>
             <CardDescription className="text-muted-foreground">
-              Enter the Evolution API base URL, instance name, and apikey header. On this VPS the default server-side values are already configured.
+              Informe a URL base da API Evolution, o nome da instância e o cabeçalho apikey. Nesta VPS, os valores padrão do servidor já estão configurados.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Evolution instance name</Label>
+              <Label className="text-muted-foreground">Nome da instância Evolution</Label>
               <Input
-                placeholder="e.g. my_company_whatsapp"
+                placeholder="ex.: whatsapp_minha_empresa"
                 value={evolutionInstance}
                 onChange={(e) => setEvolutionInstance(e.target.value)}
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
@@ -551,7 +551,7 @@ export function WhatsAppConfig() {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Evolution API base URL</Label>
+              <Label className="text-muted-foreground">URL base da API Evolution</Label>
               <Input
                 placeholder="http://127.0.0.1:8080"
                 value={evolutionBaseUrl}
@@ -561,11 +561,11 @@ export function WhatsAppConfig() {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-muted-foreground">Evolution API key / apikey header</Label>
+              <Label className="text-muted-foreground">Chave da API Evolution / cabeçalho apikey</Label>
               <div className="relative">
                 <Input
                   type={showToken ? 'text' : 'password'}
-                  placeholder="Leave blank to use the server default, or paste a specific apikey"
+                  placeholder="Deixe em branco para usar o padrão do servidor, ou cole uma apikey específica"
                   value={accessToken}
                   onChange={(e) => {
                     setAccessToken(e.target.value);
@@ -589,21 +589,21 @@ export function WhatsAppConfig() {
               </div>
               {config && !tokenEdited && (
                 <p className="text-xs text-muted-foreground">
-                  API key is hidden for security. Leave it unchanged to keep the stored key, or paste a new one to rotate it.
+                  A chave da API fica oculta por segurança. Deixe inalterada para manter a chave armazenada, ou cole uma nova para trocá-la.
                 </p>
               )}
             </div>
 
             {qrCode && (
               <div className="rounded-lg border border-border bg-muted p-4 text-sm text-muted-foreground">
-                <p className="font-medium text-foreground mb-2">QR Code / pairing payload</p>
+                <p className="font-medium text-foreground mb-2">QR Code / código de pareamento</p>
                 {qrCode.startsWith('data:') || qrCode.startsWith('http') ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={qrCode} alt="Evolution WhatsApp QR Code" className="max-w-64 rounded bg-white p-2" />
                 ) : (
                   <pre className="whitespace-pre-wrap break-all text-xs">{qrCode}</pre>
                 )}
-                <p className="mt-2">Scan this QR with WhatsApp. The connection state should become open/connected.</p>
+                <p className="mt-2">Escaneie este QR com o WhatsApp. O estado da conexão deve ficar aberto/conectado.</p>
               </div>
             )}
 
@@ -617,7 +617,7 @@ export function WhatsAppConfig() {
                 className="border-border text-foreground hover:bg-muted"
               >
                 {refreshingQr ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-                Refresh QR / pairing payload
+                Atualizar QR / código de pareamento
               </Button>
             )}
 
@@ -626,14 +626,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
-                    Confirm Evolution API server
+                    Confirmar o servidor da API Evolution
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Use the local Evolution API at <code className="text-foreground">http://127.0.0.1:8080</code> from the CRM server.</li>
-                    <li>The Tailscale manager/API is available at <code className="text-foreground">https://vps-contabo.tail23fa54.ts.net:8080</code>.</li>
-                    <li>Authentication uses the Evolution <code className="text-foreground">apikey</code> header, not Meta tokens.</li>
+                    <li>Use a API Evolution local em <code className="text-foreground">http://127.0.0.1:8080</code> a partir do servidor do CRM.</li>
+                    <li>O gerenciador/API via Tailscale está disponível em <code className="text-foreground">https://vps-contabo.tail23fa54.ts.net:8080</code>.</li>
+                    <li>A autenticação usa o cabeçalho <code className="text-foreground">apikey</code> da Evolution, não tokens da Meta.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -642,14 +642,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                    Choose or create an instance
+                    Escolher ou criar uma instância
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Type a unique instance name for this account — each account/number needs its own, never reuse one that&apos;s already connected to a different account.</li>
-                    <li>Saving calls Evolution <code className="text-foreground">POST /instance/create</code> when needed.</li>
-                    <li>Then the CRM calls <code className="text-foreground">GET /instance/connect/:instanceName</code> to obtain QR/pairing data.</li>
+                    <li>Digite um nome de instância único para esta conta — cada conta/número precisa do seu próprio, nunca reutilize um já conectado a outra conta.</li>
+                    <li>Ao salvar, a Evolution chama <code className="text-foreground">POST /instance/create</code> quando necessário.</li>
+                    <li>Depois o CRM chama <code className="text-foreground">GET /instance/connect/:instanceName</code> para obter os dados de QR/pareamento.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -658,14 +658,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
-                    Save and scan QR
+                    Salvar e escanear o QR
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Fill <strong className="text-foreground">Evolution API base URL</strong> and <strong className="text-foreground">instance name</strong>.</li>
-                    <li>Leave the API key blank to use the server default, or paste a specific Evolution key.</li>
-                    <li>Click Save Configuration and scan the QR/pairing payload with WhatsApp if the state is not already open.</li>
+                    <li>Preencha a <strong className="text-foreground">URL base da API Evolution</strong> e o <strong className="text-foreground">nome da instância</strong>.</li>
+                    <li>Deixe a chave da API em branco para usar o padrão do servidor, ou cole uma chave Evolution específica.</li>
+                    <li>Clique em Salvar configuração e escaneie o QR/código de pareamento com o WhatsApp se o estado ainda não estiver aberto.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -674,14 +674,14 @@ export function WhatsAppConfig() {
                 <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
                   <span className="flex items-center gap-2">
                     <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">4</span>
-                    Webhook is configured automatically
+                    O webhook é configurado automaticamente
                   </span>
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>On save, the CRM calls Evolution <code className="text-foreground">/webhook/set/:instanceName</code>.</li>
-                    <li>The callback is <strong className="text-foreground">/api/whatsapp/webhook</strong> protected with the CRM webhook token.</li>
-                    <li>Events include QR code, connection update, message upsert/update, send message and contacts.</li>
+                    <li>Ao salvar, o CRM chama a Evolution em <code className="text-foreground">/webhook/set/:instanceName</code>.</li>
+                    <li>O callback é <strong className="text-foreground">/api/whatsapp/webhook</strong>, protegido com o token de webhook do CRM.</li>
+                    <li>Os eventos incluem QR code, atualização de conexão, inserção/atualização de mensagens, envio de mensagens e contatos.</li>
                   </ol>
                 </AccordionContent>
               </AccordionItem>
@@ -695,7 +695,7 @@ export function WhatsAppConfig() {
             className="border-border text-foreground hover:bg-muted"
           >
             {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-            Test Connection
+            Testar conexão
           </Button>
           <Button
             type="button"
@@ -704,7 +704,7 @@ export function WhatsAppConfig() {
             className="bg-primary hover:bg-primary/90"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-            Save Configuration
+            Salvar configuração
           </Button>
         </div>
 

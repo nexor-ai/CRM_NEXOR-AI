@@ -1,83 +1,95 @@
-// ============================================================
 // SSRF guard for outbound webhook delivery.
 //
-// A webhook URL is attacker-influenced (any account admin with
-// `webhooks:manage` can register one) and our server makes the request,
-// so an unguarded fetch is a Server-Side Request Forgery primitive: a
-// URL pointing at `127.0.0.1`, a cloud metadata IP (`169.254.169.254`),
-// or an RFC1918 host would let a caller probe / POST to internal
-// services from the app's network.
-//
-// `isDeliverableUrl` resolves the host and rejects any address that is
-// loopback, private, link-local, ULA, or otherwise non-publicly-
-// routable. Combined with `redirect: 'manual'` at the call site (so a
-// public URL can't 3xx-bounce to an internal one), this blocks the
-// common SSRF vectors. It is NOT a defense against DNS rebinding (a
-// host that resolves public here but flips to private before connect) —
-// that needs pinning the resolved IP into the socket, which fetch
-// doesn't expose; documented as a residual risk.
-// ============================================================
+// A target is accepted only when every resolved address is directly public.
+// Callers must also pin the validated address into the socket (see
+// pinned-request.ts), preventing DNS rebinding between validation and connect.
 
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 
-/** True for loopback / private / link-local / reserved IPv4 or IPv6. */
+/** True for non-public, special-use, malformed or reserved IPv4/IPv6. */
 export function isPrivateOrReservedIp(ip: string): boolean {
-  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
   if (v4) {
-    const a = Number(v4[1]);
-    const b = Number(v4[2]);
-    if (a === 0) return true; // "this" network
-    if (a === 10) return true; // private
-    if (a === 127) return true; // loopback
-    if (a === 169 && b === 254) return true; // link-local + cloud metadata
-    if (a === 172 && b >= 16 && b <= 31) return true; // private
-    if (a === 192 && b === 168) return true; // private
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-    return false;
+    const octets = v4.slice(1).map(Number)
+    if (octets.some((octet) => octet > 255)) return true
+    const [a, b] = octets
+    if (a === 0 || a === 10 || a === 127) return true
+    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
+    if (a === 169 && b === 254) return true // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && (b === 0 || b === 168)) return true
+    if (a === 198 && (b === 18 || b === 19 || b === 51)) return true
+    if (a === 203 && b === 0) return true
+    if (a >= 224) return true // multicast, reserved and broadcast
+    return false
   }
 
-  const v6 = ip.toLowerCase().replace(/^\[|\]$/g, '');
-  if (v6 === '::1' || v6 === '::') return true; // loopback / unspecified
-  if (v6.startsWith('fe8') || v6.startsWith('fe9') || v6.startsWith('fea') || v6.startsWith('feb'))
-    return true; // fe80::/10 link-local
-  if (v6.startsWith('fc') || v6.startsWith('fd')) return true; // fc00::/7 ULA
-  const mapped = v6.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return isPrivateOrReservedIp(mapped[1]); // IPv4-mapped
-  return false;
+  const v6 = ip.toLowerCase().replace(/^\[|\]$/g, '')
+  const mappedDecimal = v6.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (mappedDecimal) return isPrivateOrReservedIp(mappedDecimal[1])
+
+  const value = parseIpv6(v6)
+  if (value === null) return true
+
+  // URL and DNS normalize mapped addresses such as ::ffff:127.0.0.1 to
+  // ::ffff:7f00:1. Recover the embedded IPv4 before classifying it.
+  if (value >> BigInt(32) === BigInt('0xffff')) {
+    const embedded = Number(value & BigInt('0xffffffff'))
+    return isPrivateOrReservedIp(
+      `${embedded >>> 24}.${(embedded >>> 16) & 255}.${(embedded >>> 8) & 255}.${embedded & 255}`,
+    )
+  }
+
+  // Fail closed: only IPv6 global-unicast 2000::/3 is eligible.
+  if (value < BigInt('0x20000000000000000000000000000000') || value > BigInt('0x3fffffffffffffffffffffffffffffff')) {
+    return true
+  }
+
+  // Special transition/documentation ranges are not webhook destinations.
+  const prefix32 = Number(value >> BigInt(96))
+  const prefix16 = Number(value >> BigInt(112))
+  if ([0x20010000, 0x20010002, 0x20010010, 0x20010db8].includes(prefix32)) return true
+  if (prefix16 === 0x2002) return true // 6to4
+  return false
 }
 
-/**
- * True if `rawUrl`'s host resolves only to publicly-routable
- * address(es). Returns false for a malformed URL, an obvious internal
- * name (`localhost`, `*.local`, `*.internal`), a literal private IP, or
- * a hostname that resolves to any private/reserved address.
- */
+function parseIpv6(raw: string): bigint | null {
+  if (raw.includes('%') || raw.split('::').length > 2) return null
+  const [leftRaw, rightRaw = ''] = raw.split('::')
+  const left = leftRaw ? leftRaw.split(':') : []
+  const right = rightRaw ? rightRaw.split(':') : []
+  const missing = 8 - left.length - right.length
+  if ((raw.includes('::') && missing < 1) || (!raw.includes('::') && missing !== 0)) return null
+  const groups = [...left, ...Array(missing).fill('0'), ...right]
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null
+  return groups.reduce((value, group) => (value << BigInt(16)) | BigInt(`0x${group}`), BigInt(0))
+}
+
+/** True when a HTTP(S) URL resolves exclusively to public addresses. */
 export async function isDeliverableUrl(rawUrl: string): Promise<boolean> {
-  let host: string;
+  let host: string
   try {
-    host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, '');
+    const url = new URL(rawUrl)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false
+    host = url.hostname.replace(/^\[|\]$/g, '')
   } catch {
-    return false;
+    return false
   }
 
-  if (isIP(host)) return !isPrivateOrReservedIp(host);
-
-  const lower = host.toLowerCase();
+  if (isIP(host)) return !isPrivateOrReservedIp(host)
+  const lower = host.toLowerCase()
   if (
     lower === 'localhost' ||
     lower.endsWith('.localhost') ||
     lower.endsWith('.local') ||
     lower.endsWith('.internal')
-  ) {
-    return false;
-  }
+  ) return false
 
   try {
-    const results = await lookup(host, { all: true });
-    if (results.length === 0) return false;
-    return results.every((r) => !isPrivateOrReservedIp(r.address));
+    const results = await lookup(host, { all: true })
+    return results.length > 0 && results.every(({ address }) => !isPrivateOrReservedIp(address))
   } catch {
-    return false; // unresolvable → not deliverable
+    return false
   }
 }

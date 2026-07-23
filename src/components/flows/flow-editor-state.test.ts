@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  appendNodeToState,
   applyNodePositions,
   defaultConfigFor,
   uniqueNodeKey,
 } from "./flow-editor-state";
+import type { BuilderState } from "./flow-editor-state";
 import type { BuilderNode, NodeType } from "./shared";
 
 describe("uniqueNodeKey", () => {
@@ -73,6 +75,36 @@ describe("applyNodePositions", () => {
         position_y: 20,
       },
     ]);
+  });
+});
+
+describe("appendNodeToState", () => {
+  const baseState: BuilderState = {
+    name: "Teste",
+    description: "",
+    trigger_type: "manual",
+    trigger_config: {},
+    entry_node_id: "start",
+    status: "draft",
+    nodes: [
+      { node_key: "start", node_type: "start", config: { next_node_key: "" } },
+    ],
+  };
+
+  it("returns the actual suffixed key for a repeated node type", () => {
+    const first = appendNodeToState(baseState, "start");
+    const repeated = appendNodeToState(first.state, "start");
+
+    expect(repeated.nodeKey).toBe(`${first.nodeKey}_2`);
+    expect(repeated.state.nodes.at(-1)?.node_key).toBe(repeated.nodeKey);
+  });
+
+  it("makes the first node the entry node", () => {
+    const result = appendNodeToState(
+      { ...baseState, entry_node_id: null, nodes: [] },
+      "send_message",
+    );
+    expect(result.state.entry_node_id).toBe(result.nodeKey);
   });
 });
 

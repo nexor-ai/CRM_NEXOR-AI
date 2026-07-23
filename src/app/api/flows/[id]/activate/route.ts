@@ -1,34 +1,18 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
 import { validateFlowForActivation } from '@/lib/flows/validate'
-
-/**
- * POST /api/flows/[id]/activate
- *
- * Body: { status: 'draft' | 'active' | 'archived' }
- *
- * Activating runs the full validator and refuses on any 'error'
- * severity issue. Drafts and archives are unconditional — users
- * need to be able to save broken-work-in-progress and pause flows
- * without first fixing them.
- *
- * Returns the updated flow on success; on validation failure returns
- * the full issue list so the builder can highlight each problem.
- */
+import { requireRole, toErrorResponse } from '@/lib/auth/account'
 
 export async function POST(
   request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   const { id } = await context.params
-
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  let ctx
+  try {
+    ctx = await requireRole('agent')
+  } catch (err) {
+    return toErrorResponse(err)
   }
 
   const body = (await request.json().catch(() => null)) as
@@ -42,25 +26,24 @@ export async function POST(
     )
   }
 
-  // Ownership via RLS — caller's client.
-  const { data: existing } = await supabase
+  const { data: existing } = await ctx.supabase
     .from('flows')
     .select('id')
     .eq('id', id)
+    .eq('account_id', ctx.accountId)
     .maybeSingle()
   if (!existing) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 })
+    return NextResponse.json({ error: 'Não encontrado' }, { status: 404 })
   }
 
   const admin = supabaseAdmin()
-
   if (status === 'active') {
-    // Re-load with the full payload the validator needs.
     const [{ data: flow }, { data: nodes }] = await Promise.all([
       admin
         .from('flows')
         .select('name, trigger_type, trigger_config, entry_node_id')
         .eq('id', id)
+        .eq('account_id', ctx.accountId)
         .maybeSingle(),
       admin
         .from('flow_nodes')
@@ -68,7 +51,7 @@ export async function POST(
         .eq('flow_id', id),
     ])
     if (!flow) {
-      return NextResponse.json({ error: 'Not found' }, { status: 404 })
+      return NextResponse.json({ error: 'Não encontrado' }, { status: 404 })
     }
     const issues = validateFlowForActivation(
       flow as {
@@ -87,7 +70,7 @@ export async function POST(
     if (blockers.length > 0) {
       return NextResponse.json(
         {
-          error: 'Cannot activate flow — fix the issues below first.',
+          error: 'Não é possível ativar o fluxo — corrija os problemas abaixo primeiro.',
           issues,
         },
         { status: 422 },
@@ -99,10 +82,12 @@ export async function POST(
     .from('flows')
     .update({ status, updated_at: new Date().toISOString() })
     .eq('id', id)
+    .eq('account_id', ctx.accountId)
     .select()
     .maybeSingle()
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  if (!updated) return NextResponse.json({ error: 'Não encontrado' }, { status: 404 })
   return NextResponse.json({ flow: updated })
 }

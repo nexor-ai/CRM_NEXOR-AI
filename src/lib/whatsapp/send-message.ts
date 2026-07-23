@@ -25,6 +25,13 @@ import {
   sendTextMessage,
   sendTemplateMessage,
   sendMediaMessage,
+  sendContactMessage,
+  sendInteractiveButtons,
+  sendInteractiveList,
+  sendLocationMessage,
+  sendPollMessage,
+  sendStickerMessage,
+  INTERACTIVE_LIMITS,
   type MediaKind,
 } from '@/lib/whatsapp/evolution-api';
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
@@ -37,12 +44,22 @@ import {
 } from '@/lib/whatsapp/phone-utils';
 import type { MessageTemplate } from '@/types';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
+import {
+  resolveActiveWhatsAppConfig,
+  whatsappTrace,
+} from '@/lib/whatsapp/resolve-config';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const;
 export const VALID_MESSAGE_TYPES = [
   'text',
   'template',
   ...MEDIA_KINDS,
+  'location',
+  'contact',
+  'sticker',
+  'poll',
+  'interactive_buttons',
+  'interactive_list',
 ] as const;
 
 /**
@@ -74,6 +91,7 @@ export interface SendMessageParams {
   /** Structured template params (header/body/buttons). */
   templateMessageParams?: unknown;
   replyToMessageId?: string | null;
+  contentData?: Record<string, unknown> | null;
 }
 
 export interface SendMessageResult {
@@ -103,8 +121,10 @@ export function validateSendMessageParams(params: {
   contentText?: string | null;
   mediaUrl?: string | null;
   templateName?: string | null;
+  contentData?: Record<string, unknown> | null;
 }): void {
-  const { messageType, contentText, mediaUrl, templateName } = params;
+  const { messageType, contentText, mediaUrl, templateName, contentData } =
+    params;
 
   if (!messageType) {
     throw new SendMessageError('bad_request', 'message_type is required', 400);
@@ -144,6 +164,154 @@ export function validateSendMessageParams(params: {
     );
   }
 
+  if (
+    messageType === 'location' &&
+    (typeof contentData?.latitude !== 'number' ||
+      typeof contentData?.longitude !== 'number' ||
+      !Number.isFinite(contentData.latitude) ||
+      !Number.isFinite(contentData.longitude) ||
+      contentData.latitude < -90 ||
+      contentData.latitude > 90 ||
+      contentData.longitude < -180 ||
+      contentData.longitude > 180 ||
+      typeof contentData.name !== 'string' ||
+      !contentData.name.trim() ||
+      typeof contentData.address !== 'string' ||
+      !contentData.address.trim())
+  ) {
+    throw new SendMessageError(
+      'bad_request',
+      'valid latitude, longitude, name and address are required for location messages',
+      400
+    );
+  }
+  if (
+    messageType === 'contact' &&
+    (!Array.isArray(contentData?.contacts) ||
+      contentData.contacts.length === 0 ||
+      contentData.contacts.some((contact) => {
+        if (!contact || typeof contact !== 'object') return true;
+        const row = contact as Record<string, unknown>;
+        return (
+          typeof row.fullName !== 'string' ||
+          !row.fullName.trim() ||
+          typeof row.phoneNumber !== 'string' ||
+          row.phoneNumber.replace(/\D/g, '').length < 10
+        );
+      }))
+  ) {
+    throw new SendMessageError(
+      'bad_request',
+      'contacts are required for contact messages',
+      400
+    );
+  }
+  if (messageType === 'sticker' && !mediaUrl) {
+    throw new SendMessageError(
+      'bad_request',
+      'media_url is required for sticker messages',
+      400
+    );
+  }
+  if (
+    messageType === 'poll' &&
+    (typeof contentData?.name !== 'string' ||
+      !contentData.name.trim() ||
+      !Array.isArray(contentData?.values) ||
+      contentData.values.length < 2 ||
+      contentData.values.length > 10 ||
+      contentData.values.some((value) => typeof value !== 'string' || !value.trim()) ||
+      new Set(contentData.values).size !== contentData.values.length ||
+      typeof contentData.selectableCount !== 'number' ||
+      !Number.isInteger(contentData.selectableCount) ||
+      contentData.selectableCount < 0 ||
+      contentData.selectableCount > 10)
+  ) {
+    throw new SendMessageError(
+      'bad_request',
+      'name and values are required for poll messages',
+      400
+    );
+  }
+  if (messageType === 'interactive_buttons') {
+    const buttons = contentData?.buttons;
+    if (
+      !contentText ||
+      !Array.isArray(buttons) ||
+      buttons.length === 0 ||
+      buttons.length > INTERACTIVE_LIMITS.maxButtons
+    ) {
+      throw new SendMessageError(
+        'bad_request',
+        `interactive_buttons requires text and 1 to ${INTERACTIVE_LIMITS.maxButtons} buttons`,
+        400
+      );
+    }
+    const invalidButton = buttons.some((button) => {
+      if (!button || typeof button !== 'object') return true;
+      const row = button as Record<string, unknown>;
+      return (
+        typeof row.id !== 'string' ||
+        !row.id.trim() ||
+        typeof row.title !== 'string' ||
+        !row.title.trim() ||
+        row.title.length > INTERACTIVE_LIMITS.buttonTitleMaxLength
+      );
+    });
+    if (invalidButton) {
+      throw new SendMessageError(
+        'bad_request',
+        `button titles must contain 1 to ${INTERACTIVE_LIMITS.buttonTitleMaxLength} characters`,
+        400
+      );
+    }
+  }
+  if (messageType === 'interactive_list') {
+    const sections = contentData?.sections;
+    const rows = Array.isArray(sections)
+      ? sections.flatMap((section) => {
+          if (!section || typeof section !== 'object') return [];
+          const sectionRows = (section as Record<string, unknown>).rows;
+          return Array.isArray(sectionRows) ? sectionRows : [];
+        })
+      : [];
+    if (
+      !contentText ||
+      !Array.isArray(sections) ||
+      sections.length === 0 ||
+      sections.length > INTERACTIVE_LIMITS.maxListSections ||
+      rows.length === 0 ||
+      rows.length > INTERACTIVE_LIMITS.maxListRowsTotal
+    ) {
+      throw new SendMessageError(
+        'bad_request',
+        `interactive_list requires text and 1 to ${INTERACTIVE_LIMITS.maxListRowsTotal} rows`,
+        400
+      );
+    }
+    const invalidRow = rows.some((row) => {
+      if (!row || typeof row !== 'object') return true;
+      const item = row as Record<string, unknown>;
+      return (
+        typeof item.id !== 'string' ||
+        !item.id.trim() ||
+        typeof item.title !== 'string' ||
+        !item.title.trim() ||
+        item.title.length > INTERACTIVE_LIMITS.listRowTitleMaxLength ||
+        (typeof item.description === 'string' &&
+          item.description.length >
+            INTERACTIVE_LIMITS.listRowDescriptionMaxLength)
+      );
+    });
+    if (invalidRow) {
+      throw new SendMessageError(
+        'bad_request',
+        `list row titles must contain 1 to ${INTERACTIVE_LIMITS.listRowTitleMaxLength} characters`,
+        400
+      );
+    }
+  }
+
   // Meta caps media captions at 1024 chars (audio carries none).
   if (
     isMediaKind &&
@@ -175,6 +343,7 @@ export async function sendMessageToConversation(
     templateParams,
     templateMessageParams,
     replyToMessageId,
+    contentData,
   } = params;
 
   if (!conversationId) {
@@ -185,7 +354,13 @@ export async function sendMessageToConversation(
     );
   }
 
-  validateSendMessageParams({ messageType, contentText, mediaUrl, templateName });
+  validateSendMessageParams({
+    messageType,
+    contentText,
+    mediaUrl,
+    templateName,
+    contentData,
+  });
 
   const isMediaKind = (MEDIA_KINDS as readonly string[]).includes(messageType);
 
@@ -219,14 +394,13 @@ export async function sendMessageToConversation(
     );
   }
 
-  // WhatsApp config, account-scoped.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
+  // Prefer the configuration that received this conversation. Legacy rows
+  // without a stamp fall back to the account's active configuration.
+  const config = await resolveActiveWhatsAppConfig(db, accountId, {
+    preferConfigId: conversation.whatsapp_config_id ?? null,
+  });
 
-  if (configError || !config) {
+  if (!config) {
     throw new SendMessageError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
@@ -234,11 +408,24 @@ export async function sendMessageToConversation(
     );
   }
 
-  if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
-    throw new SendMessageError('whatsapp_not_configured', 'Evolution API is not configured for this account.', 400);
+  if (
+    !config.evolution_base_url ||
+    !config.evolution_instance ||
+    !config.evolution_api_key
+  ) {
+    throw new SendMessageError(
+      'whatsapp_not_configured',
+      'Evolution API is not configured for this account.',
+      400
+    );
   }
   const apiKey = decrypt(config.evolution_api_key);
-  const transport = { baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey };
+  const transport = {
+    baseUrl: config.evolution_base_url,
+    instance: config.evolution_instance,
+    apiKey,
+  };
+  const trace = whatsappTrace(config);
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
   if (isLegacyFormat(config.evolution_api_key)) {
@@ -247,7 +434,11 @@ export async function sendMessageToConversation(
       .update({ evolution_api_key: encrypt(apiKey) })
       .eq('id', config.id)
       .then(({ error }: { error: { message: string } | null }) => {
-        if (error) console.warn('[send-message] evolution_api_key GCM upgrade failed:', error.message);
+        if (error)
+          console.warn(
+            '[send-message] evolution_api_key GCM upgrade failed:',
+            error.message
+          );
       });
   }
 
@@ -255,10 +446,11 @@ export async function sendMessageToConversation(
   // belong to this same conversation — otherwise a caller could quote
   // messages they can't see by guessing UUIDs.
   let contextMessageId: string | undefined;
+  let contextFromMe: boolean | undefined;
   if (replyToMessageId) {
     const { data: parent, error: parentError } = await db
       .from('messages')
-      .select('message_id, conversation_id')
+      .select('message_id, conversation_id, sender_type')
       .eq('id', replyToMessageId)
       .eq('conversation_id', conversationId)
       .maybeSingle();
@@ -276,6 +468,7 @@ export async function sendMessageToConversation(
       );
     } else {
       contextMessageId = parent.message_id;
+      contextFromMe = parent.sender_type !== 'customer';
     }
   }
 
@@ -311,6 +504,7 @@ export async function sendMessageToConversation(
         messageParams: templateMessageParams ?? undefined,
         params: templateParams || [],
         contextMessageId,
+        contextFromMe,
       });
       return result.messageId;
     }
@@ -323,6 +517,109 @@ export async function sendMessageToConversation(
         caption: contentText || undefined,
         filename: filename || undefined,
         contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'location') {
+      const result = await sendLocationMessage({
+        ...transport,
+        to: phone,
+        latitude: contentData!.latitude as number,
+        longitude: contentData!.longitude as number,
+        name:
+          typeof contentData!.name === 'string' ? contentData!.name : undefined,
+        address:
+          typeof contentData!.address === 'string'
+            ? contentData!.address
+            : undefined,
+        contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'contact') {
+      const result = await sendContactMessage({
+        ...transport,
+        to: phone,
+        contacts: contentData!.contacts as Array<{
+          fullName: string;
+          phoneNumber: string;
+          organization?: string;
+          email?: string;
+          url?: string;
+        }>,
+        contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'sticker') {
+      const result = await sendStickerMessage({
+        ...transport,
+        to: phone,
+        sticker: mediaUrl!,
+        contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'poll') {
+      const result = await sendPollMessage({
+        ...transport,
+        to: phone,
+        name: contentData!.name as string,
+        selectableCount:
+          typeof contentData!.selectableCount === 'number'
+            ? contentData!.selectableCount
+            : 1,
+        values: contentData!.values as string[],
+        contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'interactive_buttons') {
+      const result = await sendInteractiveButtons({
+        ...transport,
+        to: phone,
+        bodyText: contentText || '',
+        headerText:
+          typeof contentData!.headerText === 'string'
+            ? contentData!.headerText
+            : undefined,
+        footerText:
+          typeof contentData!.footerText === 'string'
+            ? contentData!.footerText
+            : undefined,
+        buttons: contentData!.buttons as Array<{ id: string; title: string }>,
+        native: contentData!.native === true,
+        contextMessageId,
+        contextFromMe,
+      });
+      return result.messageId;
+    }
+    if (messageType === 'interactive_list') {
+      const result = await sendInteractiveList({
+        ...transport,
+        to: phone,
+        bodyText: contentText || '',
+        buttonLabel: String(contentData!.buttonLabel || 'Abrir'),
+        headerText:
+          typeof contentData!.headerText === 'string'
+            ? contentData!.headerText
+            : undefined,
+        footerText:
+          typeof contentData!.footerText === 'string'
+            ? contentData!.footerText
+            : undefined,
+        sections: contentData!.sections as Array<{
+          title?: string;
+          rows: Array<{ id: string; title: string; description?: string }>;
+        }>,
+        native: contentData!.native === true,
+        contextMessageId,
+        contextFromMe,
       });
       return result.messageId;
     }
@@ -331,6 +628,7 @@ export async function sendMessageToConversation(
       to: phone,
       text: contentText!,
       contextMessageId,
+      contextFromMe,
     });
     return result.messageId;
   };
@@ -366,8 +664,15 @@ export async function sendMessageToConversation(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Unknown Evolution API error';
-    console.error('[send-message] Evolution send failed for all variants:', message);
-    throw new SendMessageError('evolution_error', `Evolution API error: ${message}`, 502);
+    console.error(
+      '[send-message] Evolution send failed for all variants:',
+      message
+    );
+    throw new SendMessageError(
+      'evolution_error',
+      `Evolution API error: ${message}`,
+      502
+    );
   }
 
   if (workingPhone !== sanitizedPhone) {
@@ -387,13 +692,17 @@ export async function sendMessageToConversation(
     .insert({
       conversation_id: conversationId,
       sender_type: 'agent',
-      content_type: messageType,
+      content_type: messageType.startsWith('interactive_')
+        ? 'interactive'
+        : messageType,
       content_text: contentText || null,
       media_url: mediaUrl || null,
+      content_data: contentData || null,
       template_name: templateName || null,
       message_id: waMessageId,
       status: 'sent',
       reply_to_message_id: replyToMessageId || null,
+      ...trace,
     })
     .select()
     .single();
@@ -413,6 +722,7 @@ export async function sendMessageToConversation(
       last_message_text: contentText || `[${messageType}]`,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ...trace,
     })
     .eq('id', conversationId);
 
