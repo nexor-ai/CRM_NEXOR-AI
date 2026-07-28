@@ -85,20 +85,50 @@ NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$TARGET_
 # versionado, e um valor com caractere especial (ex.: `$(...)`, crase)
 # executaria como comando num shell que dá `source`. scripts/run-wacrm-prod.py
 # evita isso de propósito (ver seu docstring) fazendo parsing linha a linha em
-# vez de eval/source — replicamos o mesmo parsing aqui, sem tocar em nada além
-# de ler o arquivo.
+# vez de eval/source. read_env_var() replica o MESMO algoritmo de
+# parse_env_line() (run-wacrm-prod.py:21-32), linha por linha:
+#   stripped = line.strip()                    -> remove \r (CRLF), espaços
+#   if not stripped or startswith('#') ...      -> pula linha vazia/comentário
+#   key, value = stripped.split('=', 1)         -> primeiro '=' é o separador
+#   key = key.strip(); value = value.strip()    -> tira espaço ao redor de =
+#   remove um par de aspas envolvendo o valor inteiro
+# Isso é deliberadamente o MESMO parser que o processo Node real usa para ler
+# este arquivo — não um parser mais permissivo (ex.: não trata prefixo
+# `export `, porque o loader Python também não trata; uma linha
+# `export SUPABASE_DB_URL=...` fica com key="export SUPABASE_DB_URL" nos dois
+# lugares e não casa, de propósito: se o valor não chega ao processo real via
+# este mesmo loader, update.sh também não deveria enxergá-lo).
 read_env_var() {
-  local key="$1" file="$2" line value
+  local key="$1" file="$2"
   [ -f "$file" ] || return 0
-  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1)" || true
-  [ -n "$line" ] || return 0
-  value="${line#"${key}"=}"
-  # remove um par de aspas (simples ou duplas) envolvendo o valor inteiro —
-  # mesma regra do loader Python em run-wacrm-prod.py.
-  if [[ ( "$value" == \"*\" && "$value" == *\" ) || ( "$value" == \'*\' && "$value" == *\' ) ]]; then
-    value="${value:1:-1}"
+  local line stripped k v result=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    stripped="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [ -n "$stripped" ] || continue
+    case "$stripped" in
+      \#*) continue ;;
+    esac
+    case "$stripped" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    k="${stripped%%=*}"
+    v="${stripped#*=}"
+    k="$(printf '%s' "$k" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [ -n "$k" ] || continue
+    [ "$k" = "$key" ] || continue
+    v="$(printf '%s' "$v" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    # último match vence, igual ao loader Python (que só sobrescreve
+    # os.environ[key] a cada ocorrência, em ordem).
+    result="$v"
+  done < "$file"
+  if [ -n "$result" ]; then
+    if [[ ( "$result" == \"*\" && "$result" == *\" ) || ( "$result" == \'*\' && "$result" == *\' ) ]]; then
+      result="${result:1:-1}"
+    fi
+    printf '%s' "$result"
   fi
-  printf '%s' "$value"
 }
 
 if [ -z "${SUPABASE_DB_URL:-}" ]; then
