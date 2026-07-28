@@ -156,6 +156,72 @@ function isTlsError(err) {
   );
 }
 
+// sslmode que desligam ou enfraquecem a verificação de certificado de propósito
+// (não são "modo estrito não pedido", são pedido explícito de downgrade) — a
+// única resposta aceitável é abortar, nunca seguir em frente calado.
+const REJECTED_SSLMODES = new Set(["disable", "no-verify"]);
+
+// Todo parâmetro que o pg-connection-string usa para decidir sozinho o valor de
+// `config.ssl` (ver node_modules/pg-connection-string/index.js:74). O ponto
+// crítico: `pg.Client` faz `Object.assign({}, config, parse(connectionString))`
+// (node_modules/pg/lib/connection-parameters.js:59) — ou seja, o que a URL diz
+// GANHA do objeto `ssl` explícito que passamos no construtor. Uma
+// `SUPABASE_DB_URL` com `?sslmode=require` colada direto do painel do Supabase
+// silenciosamente zera nosso `ssl: { rejectUnauthorized: true, ca: ... }` e
+// troca por `ssl: {}` (descartando o CA de SUPABASE_DB_CA_PATH); com
+// `?sslmode=disable` a conexão vira texto claro. Nenhum desses parâmetros pode
+// sobreviver na connection string que chega ao pg — removê-los é a única forma
+// de garantir que o `ssl` que construímos é o que de fato é usado.
+const SSL_RELATED_PARAMS = [
+  "sslmode",
+  "sslcert",
+  "sslkey",
+  "sslrootcert",
+  "sslpassword",
+  "sslnegotiation",
+  "ssl",
+  "uselibpqcompat",
+];
+
+/**
+ * Valida e limpa a connection string de parâmetros ssl* antes de entregá-la ao
+ * `pg.Client`, para que o `ssl` explícito (rejectUnauthorized: true, + CA de
+ * SUPABASE_DB_CA_PATH) seja sempre o que vale — nunca o que a URL diz.
+ *
+ * - `sslmode=disable` / `sslmode=no-verify` são pedidos explícitos de
+ *   downgrade: aborta com erro em vez de neutralizar em silêncio.
+ * - Qualquer outro parâmetro ssl* (incluindo `sslmode=require`, comum em
+ *   strings coladas do painel do Supabase) é removido da URL. `removedParams`
+ *   no retorno serve só para o runner poder avisar o operador do que ignorou.
+ */
+export function sanitizeConnectionString(connectionString) {
+  let url;
+  try {
+    url = new URL(connectionString);
+  } catch (err) {
+    throw new Error(
+      `SUPABASE_DB_URL não é uma connection string válida (formato esperado: postgres://usuario:senha@host:porta/banco). Detalhe: ${err.message}`,
+    );
+  }
+
+  const sslmode = url.searchParams.get("sslmode");
+  if (sslmode && REJECTED_SSLMODES.has(sslmode)) {
+    throw new Error(
+      `SUPABASE_DB_URL contém sslmode=${sslmode}, que desliga ou desativa a verificação de certificado TLS. Este runner exige verificação de certificado sempre ligada (rejectUnauthorized: true) e não aceita esse parâmetro — remova sslmode da connection string. O runner já configura TLS verificado por conta própria; para CA própria use a variável SUPABASE_DB_CA_PATH.`,
+    );
+  }
+
+  const removedParams = [];
+  for (const param of SSL_RELATED_PARAMS) {
+    if (url.searchParams.has(param)) {
+      url.searchParams.delete(param);
+      removedParams.push(param);
+    }
+  }
+
+  return { connectionString: url.toString(), removedParams };
+}
+
 /**
  * Adquire pg_advisory_lock por polling (pg_try_advisory_lock a cada 500ms) até
  * 30s. Impede que duas execuções simultâneas do update.sh apliquem a mesma
@@ -243,9 +309,23 @@ async function main() {
     readMigrationFile(MIGRATIONS_DIR, filename),
   );
 
+  let sanitized;
+  try {
+    sanitized = sanitizeConnectionString(dbUrl);
+  } catch (err) {
+    console.error(`[migrate] ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (sanitized.removedParams.length > 0) {
+    console.log(
+      `[migrate] ignorando parâmetro(s) de TLS na connection string (${sanitized.removedParams.join(", ")}) — o runner usa sua própria configuração de TLS verificado, veja SUPABASE_DB_CA_PATH se precisar de uma CA própria.`,
+    );
+  }
+
   const { default: pg } = await import("pg");
   const client = new pg.Client({
-    connectionString: dbUrl,
+    connectionString: sanitized.connectionString,
     ssl: buildSslConfig(),
   });
 
@@ -279,13 +359,31 @@ async function main() {
         return;
       }
       const baselineFilenames = resolveBaselineSet(files, args.baseline);
-      for (const filename of baselineFilenames) {
-        const file = filesWithChecksum.find((f) => f.filename === filename);
-        await client.query(
-          "insert into public.schema_migrations (filename, checksum) values ($1, $2)",
-          [file.filename, file.checksum],
+      // Uma transação só para o baseline inteiro: se a conexão cair no meio do
+      // registro (ex.: arquivo 30 de 43), sem transação a tabela ficaria com 29
+      // linhas — não mais vazia, então --baseline nunca mais rodaria (checagem
+      // acima), e uma execução normal tentaria reaplicar 030..043 num schema
+      // que já os tem, exatamente o cenário que a flag existe para evitar. Com
+      // rollback em caso de erro, a tabela volta a ficar vazia e --baseline
+      // pode ser tentado de novo.
+      try {
+        await client.query("begin");
+        for (const filename of baselineFilenames) {
+          const file = filesWithChecksum.find((f) => f.filename === filename);
+          await client.query(
+            "insert into public.schema_migrations (filename, checksum) values ($1, $2)",
+            [file.filename, file.checksum],
+          );
+          console.log(`[migrate] baseline: ${file.filename}`);
+        }
+        await client.query("commit");
+      } catch (err) {
+        await client.query("rollback").catch(() => {});
+        console.error(
+          `[migrate] Falha ao registrar baseline: ${err.message}. Nada foi gravado (rollback) — schema_migrations continua vazia, pode tentar de novo.`,
         );
-        console.log(`[migrate] baseline: ${file.filename}`);
+        process.exitCode = 1;
+        return;
       }
       console.log(
         `[migrate] baseline concluído: ${baselineFilenames.length} migration(ões) registrada(s) sem execução.`,

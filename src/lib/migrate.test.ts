@@ -5,11 +5,13 @@
 // nunca seria descoberto por `npm run test`. Import relativo para o .mjs real:
 // nenhuma lógica é duplicada, isto testa o módulo que o runner de fato usa.
 import { describe, expect, it } from "vitest";
+import pg from "pg";
 import {
   computeChecksum,
   computePendingSet,
   parseMigrationFilename,
   resolveBaselineSet,
+  sanitizeConnectionString,
   sortAndValidateMigrationFilenames,
 } from "../../scripts/migrate.mjs";
 
@@ -159,5 +161,118 @@ describe("resolveBaselineSet", () => {
   it("com NNN 0 não inclui nada, e com NNN alto inclui tudo", () => {
     expect(resolveBaselineSet(files, 0)).toEqual([]);
     expect(resolveBaselineSet(files, 999)).toEqual(files);
+  });
+});
+
+describe("sanitizeConnectionString", () => {
+  const RAW = "postgres://user:pass@db.supabase.co:5432/postgres";
+
+  it("passa uma connection string limpa sem alterações", () => {
+    const result = sanitizeConnectionString(RAW);
+    expect(result.removedParams).toEqual([]);
+    // Comparamos via URL, não string crua: URL normaliza formatação (ex.
+    // barra final) sem mudar o que o pg efetivamente recebe.
+    expect(new URL(result.connectionString).toString()).toBe(
+      new URL(RAW).toString(),
+    );
+  });
+
+  it("rejeita sslmode=disable — pedido explícito de conexão em texto claro", () => {
+    expect(() =>
+      sanitizeConnectionString(`${RAW}?sslmode=disable`),
+    ).toThrowError(/sslmode=disable/);
+  });
+
+  it("rejeita sslmode=no-verify — pedido explícito de pular verificação", () => {
+    expect(() =>
+      sanitizeConnectionString(`${RAW}?sslmode=no-verify`),
+    ).toThrowError(/sslmode=no-verify/);
+  });
+
+  it("neutraliza sslmode=require removendo o parâmetro em vez de confiar nele", () => {
+    // Este é o caso comum de string colada do painel do Supabase. Não é um
+    // pedido de downgrade, mas o pg-connection-string ainda assim zera o
+    // ssl explícito quando vê esse parâmetro — por isso precisa ser
+    // removido, não apenas aceito.
+    const result = sanitizeConnectionString(`${RAW}?sslmode=require`);
+    expect(result.removedParams).toContain("sslmode");
+    expect(new URL(result.connectionString).searchParams.has("sslmode")).toBe(
+      false,
+    );
+  });
+
+  it("neutraliza sslrootcert, sslcert e sslkey mesmo sem sslmode", () => {
+    const result = sanitizeConnectionString(
+      `${RAW}?sslrootcert=/tmp/ca.pem&sslcert=/tmp/c.pem&sslkey=/tmp/k.pem`,
+    );
+    expect(result.removedParams.sort()).toEqual([
+      "sslcert",
+      "sslkey",
+      "sslrootcert",
+    ]);
+    const url = new URL(result.connectionString);
+    expect(url.searchParams.has("sslrootcert")).toBe(false);
+    expect(url.searchParams.has("sslcert")).toBe(false);
+    expect(url.searchParams.has("sslkey")).toBe(false);
+  });
+
+  it("lança erro claro para uma string que não é uma URL válida", () => {
+    expect(() => sanitizeConnectionString("isso não é uma url")).toThrow();
+  });
+
+  // Verificação empírica de ponta a ponta contra o próprio `pg`: constrói um
+  // pg.Client (sem chamar connect(), então nenhuma rede é tocada) com a
+  // connection string sanitizada e confere o `ssl` resultante em
+  // client.connectionParameters — o objeto que de fato seria usado no
+  // handshake TLS. Isto é o que prova que nenhuma entrada consegue produzir
+  // uma conexão não verificada: se o sanitizer for removido ou quebrado,
+  // estes casos voltam a mostrar `ssl` diferente do explícito.
+  describe("integração com pg.Client (sem conectar)", () => {
+    const explicitSsl = { rejectUnauthorized: true, marker: "explicito" };
+
+    // `connectionParameters` é interno ao pg e não está em @types/pg — daí o
+    // cast. É exatamente o que o construtor de fato monta a partir de
+    // `Object.assign({}, config, parse(connectionString))`, então é o único
+    // jeito de checar empiricamente qual `ssl` sobrevive sem chamar connect().
+    function clientSsl(client: pg.Client): unknown {
+      return (client as unknown as { connectionParameters: { ssl: unknown } })
+        .connectionParameters.ssl;
+    }
+
+    function resolvedSsl(connectionString: string) {
+      const sanitized = sanitizeConnectionString(connectionString);
+      const client = new pg.Client({
+        connectionString: sanitized.connectionString,
+        ssl: explicitSsl,
+      });
+      return clientSsl(client);
+    }
+
+    it("sslmode=require sanitizado não sobrescreve o ssl explícito", () => {
+      expect(resolvedSsl(`${RAW}?sslmode=require`)).toEqual(explicitSsl);
+    });
+
+    it("connection string limpa preserva o ssl explícito", () => {
+      expect(resolvedSsl(RAW)).toEqual(explicitSsl);
+    });
+
+    it("prova o problema original: SEM sanitizar, sslmode=require zera o ssl explícito", () => {
+      // Este teste falharia (corretamente) se alguém "consertasse" o pg — ele
+      // documenta o comportamento de terceiro que motiva o sanitizer existir.
+      const client = new pg.Client({
+        connectionString: `${RAW}?sslmode=require`,
+        ssl: explicitSsl,
+      });
+      expect(clientSsl(client)).not.toEqual(explicitSsl);
+      expect(clientSsl(client)).toEqual({});
+    });
+
+    it("prova o problema original: SEM sanitizar, sslmode=disable derruba o TLS", () => {
+      const client = new pg.Client({
+        connectionString: `${RAW}?sslmode=disable`,
+        ssl: explicitSsl,
+      });
+      expect(clientSsl(client)).toBe(false);
+    });
   });
 });
