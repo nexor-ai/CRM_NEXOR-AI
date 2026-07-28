@@ -1,6 +1,6 @@
 {
   "name": "nexor-crm",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "NEXOR CRM — operação comercial com WhatsApp, contatos, funis, broadcasts, automações e agentes de IA.",
   "license": "MIT",
