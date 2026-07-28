@@ -35,7 +35,7 @@ END $$;
 -- Só o bloco acima toca tabelas com dados; o resto cria tabelas novas.
 RESET lock_timeout;
 
-CREATE TABLE public.external_operations (
+CREATE TABLE IF NOT EXISTS public.external_operations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
   whatsapp_config_id UUID,
@@ -71,10 +71,10 @@ CREATE TABLE public.external_operations (
     REFERENCES public.conversations(account_id, id) ON DELETE SET NULL (conversation_id)
 );
 
-CREATE INDEX external_operations_claim_idx
+CREATE INDEX IF NOT EXISTS external_operations_claim_idx
   ON public.external_operations (status, available_at, created_at)
   WHERE status IN ('pending', 'processing');
-CREATE INDEX external_operations_reliability_idx
+CREATE INDEX IF NOT EXISTS external_operations_reliability_idx
   ON public.external_operations (account_id, status, updated_at DESC);
 
 ALTER TABLE public.external_operations ENABLE ROW LEVEL SECURITY;
