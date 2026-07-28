@@ -1,0 +1,20 @@
+[Unit]
+Description=NEXOR CRM — servidor Next.js de produção
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+Environment=PATH=__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin
+Environment=NEXOR_ENV=__INSTALL_DIR__/.env
+Environment=PORT=__PORT__
+Environment=HOST=127.0.0.1
+ExecStart=/usr/bin/python3 __INSTALL_DIR__/scripts/run-wacrm-prod.py
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
