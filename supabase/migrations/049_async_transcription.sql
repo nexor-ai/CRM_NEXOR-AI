@@ -3,8 +3,9 @@
 CREATE TABLE IF NOT EXISTS transcription_jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  -- messages não tem account_id, então esta FK não pode ser composta.
   message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  conversation_id uuid NOT NULL,
   whatsapp_config_id uuid,
   department_id uuid,
   storage_key text NOT NULL,
@@ -28,7 +29,20 @@ CREATE TABLE IF NOT EXISTS transcription_jobs (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(account_id, message_id),
-  CHECK (attempts <= max_attempts)
+  UNIQUE (account_id, id),
+  CHECK (attempts <= max_attempts),
+  -- Sem estas FKs compostas, um job da conta A poderia apontar para uma conversa
+  -- da conta B e gravar o áudio transcrito de um cliente sob outro.
+  FOREIGN KEY (account_id, conversation_id) REFERENCES conversations(account_id, id)
+    ON DELETE CASCADE,
+  -- PostgreSQL 15+ aceita lista de colunas em SET NULL: mantém a semântica de
+  -- 046 (whatsapp_config_id ON DELETE SET NULL) sem anular account_id (NOT NULL)
+  -- e sem apagar a trilha de transcrição ao remover uma instância.
+  FOREIGN KEY (account_id, whatsapp_config_id) REFERENCES whatsapp_config(account_id, id)
+    ON DELETE SET NULL (whatsapp_config_id),
+  -- RESTRICT segue a convenção de departamentos da 046.
+  FOREIGN KEY (account_id, department_id) REFERENCES departments(account_id, id)
+    ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS transcription_jobs_claim_idx
   ON transcription_jobs(status, available_at, created_at)
@@ -37,8 +51,9 @@ CREATE INDEX IF NOT EXISTS transcription_jobs_claim_idx
 CREATE TABLE IF NOT EXISTS message_transcripts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  -- messages não tem account_id, então esta FK não pode ser composta.
   message_id uuid NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
-  job_id uuid NOT NULL UNIQUE REFERENCES transcription_jobs(id) ON DELETE CASCADE,
+  job_id uuid NOT NULL UNIQUE,
   transcript text NOT NULL CHECK (length(trim(transcript)) > 0),
   language text,
   confidence numeric CHECK (confidence BETWEEN 0 AND 1),
@@ -47,7 +62,9 @@ CREATE TABLE IF NOT EXISTS message_transcripts (
   processing_ms integer CHECK (processing_ms >= 0),
   consent_basis text NOT NULL CHECK (consent_basis IN ('inbound_customer_audio')),
   retention_until timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (account_id, job_id) REFERENCES transcription_jobs(account_id, id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS reliability_recovery_requests (

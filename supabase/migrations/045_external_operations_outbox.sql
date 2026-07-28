@@ -1,11 +1,46 @@
 -- Durable outbox for externally visible, non-transactional effects.
 -- Raw payloads are service-role only; clients receive aggregate reliability data.
 
+-- O bloco abaixo altera whatsapp_config e conversations, que já têm dados de
+-- clientes reais. ALTER TABLE ... ADD CONSTRAINT UNIQUE pega ACCESS EXCLUSIVE e
+-- segura o lock pela transação inteira; conversations é a tabela mais quente do
+-- CRM. Sem lock_timeout, um lock concorrente transforma a migration em apagão
+-- indefinido em vez de erro rápido e reversível.
+SET lock_timeout = '5s';
+
+-- whatsapp_config e conversations nascem em migrations já aplicadas e não podem
+-- ser reescritas; sem UNIQUE (account_id, id) o Postgres recusa as FKs compostas
+-- abaixo. PostgreSQL não tem "ADD CONSTRAINT IF NOT EXISTS", então guarda-se via
+-- pg_constraint. (account_id, id) já é único de fato porque id é a PK.
+DO $$
+DECLARE item RECORD;
+BEGIN
+  FOR item IN SELECT * FROM (VALUES
+    ('whatsapp_config', 'whatsapp_config_account_id_id_key'),
+    ('conversations', 'conversations_account_id_id_key')
+  ) AS x(table_name, constraint_name)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = item.constraint_name
+        AND conrelid = ('public.' || item.table_name)::regclass
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE public.%I ADD CONSTRAINT %I UNIQUE (account_id, id)',
+        item.table_name, item.constraint_name
+      );
+    END IF;
+  END LOOP;
+END $$;
+-- Só o bloco acima toca tabelas com dados; o resto cria tabelas novas.
+RESET lock_timeout;
+
 CREATE TABLE public.external_operations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
-  whatsapp_config_id UUID REFERENCES public.whatsapp_config(id) ON DELETE SET NULL,
-  conversation_id UUID REFERENCES public.conversations(id) ON DELETE SET NULL,
+  whatsapp_config_id UUID,
+  conversation_id UUID,
+  -- messages não tem account_id, então esta FK não pode ser composta.
   message_id UUID REFERENCES public.messages(id) ON DELETE SET NULL,
   operation_type TEXT NOT NULL CHECK (length(operation_type) BETWEEN 1 AND 80),
   idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 200),
@@ -27,7 +62,13 @@ CREATE TABLE public.external_operations (
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (account_id, operation_type, idempotency_key)
+  UNIQUE (account_id, operation_type, idempotency_key),
+  -- PostgreSQL 15+ aceita lista de colunas em SET NULL: as FKs ficam compostas
+  -- (isolamento por conta) sem tentar anular account_id, que é NOT NULL.
+  FOREIGN KEY (account_id, whatsapp_config_id)
+    REFERENCES public.whatsapp_config(account_id, id) ON DELETE SET NULL (whatsapp_config_id),
+  FOREIGN KEY (account_id, conversation_id)
+    REFERENCES public.conversations(account_id, id) ON DELETE SET NULL (conversation_id)
 );
 
 CREATE INDEX external_operations_claim_idx
