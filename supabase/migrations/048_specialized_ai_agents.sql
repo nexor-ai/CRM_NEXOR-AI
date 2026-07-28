@@ -22,6 +22,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_agents_one_default_per_account
   ON ai_agents(account_id) WHERE is_default;
 CREATE INDEX IF NOT EXISTS ai_agents_account_idx ON ai_agents(account_id, is_active);
 
+-- whatsapp_config e conversations nascem em migrations já aplicadas e não podem
+-- ser reescritas; sem UNIQUE (account_id, id) o Postgres recusa as FKs compostas
+-- abaixo. PostgreSQL não tem "ADD CONSTRAINT IF NOT EXISTS", então guarda-se via
+-- pg_constraint. (account_id, id) já é único de fato porque id é a PK.
+DO $$
+DECLARE item RECORD;
+BEGIN
+  FOR item IN SELECT * FROM (VALUES
+    ('whatsapp_config', 'whatsapp_config_account_id_id_key'),
+    ('conversations', 'conversations_account_id_id_key')
+  ) AS x(table_name, constraint_name)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = item.constraint_name
+        AND conrelid = item.table_name::regclass
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE %I ADD CONSTRAINT %I UNIQUE (account_id, id)',
+        item.table_name, item.constraint_name
+      );
+    END IF;
+  END LOOP;
+END $$;
+
 CREATE TABLE IF NOT EXISTS ai_agent_bindings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -32,6 +57,8 @@ CREATE TABLE IF NOT EXISTS ai_agent_bindings (
   is_active boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now(),
   FOREIGN KEY (account_id, agent_id) REFERENCES ai_agents(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, whatsapp_config_id) REFERENCES whatsapp_config(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, department_id) REFERENCES departments(account_id, id) ON DELETE RESTRICT,
   CHECK (whatsapp_config_id IS NOT NULL OR department_id IS NOT NULL)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ai_agent_binding_scope_unique ON ai_agent_bindings(
@@ -41,7 +68,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_agent_binding_scope_unique ON ai_agent_bind
 ) WHERE is_active;
 
 CREATE TABLE IF NOT EXISTS conversation_agent_state (
-  conversation_id uuid PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  conversation_id uuid PRIMARY KEY,
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   sticky_agent_id uuid REFERENCES ai_agents(id) ON DELETE SET NULL,
   handoff_status text NOT NULL DEFAULT 'none'
@@ -50,14 +77,15 @@ CREATE TABLE IF NOT EXISTS conversation_agent_state (
   handoff_at timestamptz,
   reply_count integer NOT NULL DEFAULT 0 CHECK (reply_count >= 0),
   budget_reserved_cents integer NOT NULL DEFAULT 0 CHECK (budget_reserved_cents >= 0),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (account_id, conversation_id) REFERENCES conversations(account_id, id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS ai_agent_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
-  agent_id uuid NOT NULL REFERENCES ai_agents(id) ON DELETE RESTRICT,
+  agent_id uuid NOT NULL,
   binding_id uuid REFERENCES ai_agent_bindings(id) ON DELETE SET NULL,
   whatsapp_config_id uuid,
   department_id uuid,
@@ -77,7 +105,9 @@ CREATE TABLE IF NOT EXISTS ai_agent_runs (
   error_message text,
   started_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (account_id, agent_id) REFERENCES ai_agents(account_id, id) ON DELETE RESTRICT,
+  UNIQUE (account_id, id)
 );
 CREATE INDEX IF NOT EXISTS ai_agent_runs_account_created_idx
   ON ai_agent_runs(account_id, created_at DESC);
@@ -87,13 +117,14 @@ CREATE INDEX IF NOT EXISTS ai_agent_runs_budget_idx
 CREATE TABLE IF NOT EXISTS ai_agent_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  run_id uuid REFERENCES ai_agent_runs(id) ON DELETE CASCADE,
+  run_id uuid,
   agent_id uuid REFERENCES ai_agents(id) ON DELETE SET NULL,
   conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
   event_type text NOT NULL,
   detail jsonb NOT NULL DEFAULT '{}'::jsonb,
   actor_user_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (account_id, run_id) REFERENCES ai_agent_runs(account_id, id) ON DELETE CASCADE
 );
 
 DO $$

@@ -6,42 +6,52 @@ CREATE TABLE IF NOT EXISTS channels (
   is_active boolean NOT NULL DEFAULT true, created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT newsletter_target_forbidden CHECK (position('@newsletter' in lower(target))=0),
-  UNIQUE(account_id,name)
+  UNIQUE(account_id,name), UNIQUE (account_id, id),
+  FOREIGN KEY (account_id, department_id) REFERENCES departments(account_id, id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS channel_posts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE RESTRICT, department_id uuid,
+  channel_id uuid NOT NULL, department_id uuid,
   title text NOT NULL, status text NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','in_review','approved','exported','confirmed','cancelled')),
   current_revision integer NOT NULL DEFAULT 0 CHECK(current_revision>=0),
-  created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (account_id, id),
+  FOREIGN KEY (account_id, channel_id) REFERENCES channels(account_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (account_id, department_id) REFERENCES departments(account_id, id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS channel_post_revisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  post_id uuid NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE, revision integer NOT NULL CHECK(revision>0),
+  post_id uuid NOT NULL, revision integer NOT NULL CHECK(revision>0),
   title text NOT NULL, body text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   content_hash text NOT NULL CHECK(content_hash~'^[0-9a-f]{64}$'), created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id,revision), UNIQUE(post_id,content_hash)
+  created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id,revision), UNIQUE(post_id,content_hash),
+  UNIQUE (account_id, id),
+  FOREIGN KEY (account_id, post_id) REFERENCES channel_posts(account_id, id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS channel_post_approvals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  post_id uuid NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE,
-  revision_id uuid NOT NULL REFERENCES channel_post_revisions(id) ON DELETE RESTRICT,
+  post_id uuid NOT NULL, revision_id uuid NOT NULL,
   decision text NOT NULL CHECK(decision IN ('approved','rejected')),
-  decided_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, note text, created_at timestamptz NOT NULL DEFAULT now()
+  decided_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, note text, created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (account_id, post_id) REFERENCES channel_posts(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, revision_id) REFERENCES channel_post_revisions(account_id, id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS channel_manual_packages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  post_id uuid NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE,
-  revision_id uuid NOT NULL REFERENCES channel_post_revisions(id) ON DELETE RESTRICT,
+  post_id uuid NOT NULL, revision_id uuid NOT NULL,
   package_hash text NOT NULL CHECK(package_hash~'^[0-9a-f]{64}$'), package_payload jsonb NOT NULL,
-  exported_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, exported_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id,revision_id)
+  exported_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, exported_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id,revision_id),
+  UNIQUE (account_id, id),
+  FOREIGN KEY (account_id, post_id) REFERENCES channel_posts(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, revision_id) REFERENCES channel_post_revisions(account_id, id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS channel_publish_evidence (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  post_id uuid NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE,
-  package_id uuid NOT NULL REFERENCES channel_manual_packages(id) ON DELETE RESTRICT,
+  post_id uuid NOT NULL, package_id uuid NOT NULL,
   confirmation text NOT NULL, external_reference text, evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
-  confirmed_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, confirmed_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id)
+  confirmed_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, confirmed_at timestamptz NOT NULL DEFAULT now(), UNIQUE(post_id),
+  FOREIGN KEY (account_id, post_id) REFERENCES channel_posts(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, package_id) REFERENCES channel_manual_packages(account_id, id) ON DELETE RESTRICT
 );
 
 DO $$ DECLARE t text; BEGIN FOREACH t IN ARRAY ARRAY['channels','channel_posts','channel_post_revisions','channel_post_approvals','channel_manual_packages','channel_publish_evidence'] LOOP EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY',t); EXECUTE format('DROP POLICY IF EXISTS %I ON %I',t||'_read',t); EXECUTE format('CREATE POLICY %I ON %I FOR SELECT USING (is_account_member(account_id))',t||'_read',t); EXECUTE format('DROP POLICY IF EXISTS %I ON %I',t||'_write',t); EXECUTE format('CREATE POLICY %I ON %I FOR ALL USING (is_account_member(account_id,''admin'')) WITH CHECK (is_account_member(account_id,''admin''))',t||'_write',t); END LOOP; END $$;
