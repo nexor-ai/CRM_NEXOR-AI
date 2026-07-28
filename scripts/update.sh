@@ -44,16 +44,47 @@ NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$LATEST_
 rollback() {
   echo ""
   echo "!!! FALHA NA ATUALIZAÇÃO — restaurando $PREVIOUS_SHA" >&2
-  git checkout --force "$PREVIOUS_SHA"
-  npm ci
-  npm run build
-  systemctl --user restart wacrm.service wacrm-worker.service
-  echo "!!! Versão anterior restaurada. Log completo em $LOG_FILE" >&2
+
+  local failed_steps=""
+
+  git checkout --force "$PREVIOUS_SHA" \
+    || failed_steps="${failed_steps}  - git checkout --force $PREVIOUS_SHA\n"
+  npm ci \
+    || failed_steps="${failed_steps}  - npm ci\n"
+  npm run build \
+    || failed_steps="${failed_steps}  - npm run build\n"
+  systemctl --user restart wacrm.service wacrm-worker.service \
+    || failed_steps="${failed_steps}  - systemctl --user restart wacrm.service wacrm-worker.service\n"
+
+  if [ -z "$failed_steps" ]; then
+    echo "!!! Versão anterior restaurada com sucesso. Log completo em $LOG_FILE" >&2
+  else
+    {
+      echo ""
+      echo "############################################################"
+      echo "# EMERGÊNCIA: A RECUPERAÇÃO AUTOMÁTICA FALHOU               #"
+      echo "############################################################"
+      echo "O CRM PODE ESTAR FORA DO AR neste momento."
+      echo ""
+      echo "Etapa(s) da recuperação que falharam:"
+      echo -e "$failed_steps"
+      echo "Rode manualmente, nesta ordem, no servidor (diretório $INSTALL_DIR):"
+      echo "  cd $INSTALL_DIR"
+      echo "  git checkout --force $PREVIOUS_SHA"
+      echo "  npm ci"
+      echo "  npm run build"
+      echo "  systemctl --user restart wacrm.service wacrm-worker.service"
+      echo ""
+      echo "Log completo em: $LOG_FILE"
+      echo "############################################################"
+    } >&2
+  fi
+
   exit 1
 }
 
 # 4. Atualizar
-git checkout --force "tags/$LATEST_TAG"
+git checkout --force "tags/$LATEST_TAG" || rollback
 npm ci || rollback
 npm run build || rollback
 
