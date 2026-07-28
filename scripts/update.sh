@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Atualiza o NEXOR CRM para a última release publicada, com rollback automático.
+# Atualiza o NEXOR CRM para o topo da branch de distribuição, com rollback
+# automático. A branch — e não a última tag — é o que /api/updates compara para
+# decidir se avisa o usuário; se este script seguisse a tag, quem atualizasse
+# continuaria vendo o aviso.
 set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,22 +48,26 @@ fi
 PREVIOUS_SHA="$(git rev-parse HEAD)"
 echo "==> Versão atual: $PREVIOUS_SHA"
 
-# 2. Buscar a última release
-git fetch --tags --prune origin
-LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | head -n1)"
-if [ -z "$LATEST_TAG" ]; then
-  echo "ERRO: nenhuma tag de release encontrada no repositório." >&2
+# 2. Buscar o topo da branch de distribuição
+BRANCH="${NEXOR_UPDATE_BRANCH:-main}"
+git fetch --prune --tags origin
+TARGET_SHA="$(git rev-parse "origin/$BRANCH" 2>/dev/null || true)"
+if [ -z "$TARGET_SHA" ]; then
+  echo "ERRO: branch origin/$BRANCH não encontrada no repositório." >&2
   exit 1
 fi
-echo "==> Última release: $LATEST_TAG"
+echo "==> Alvo: origin/$BRANCH ($TARGET_SHA)"
 
-if [ "$(git rev-parse "$LATEST_TAG")" = "$PREVIOUS_SHA" ]; then
+if [ "$TARGET_SHA" = "$PREVIOUS_SHA" ]; then
   echo "==> Já está na versão mais recente. Nada a fazer."
   exit 0
 fi
 
+echo "==> Commits a aplicar:"
+git log --oneline "$PREVIOUS_SHA..$TARGET_SHA" | sed 's/^/    /'
+
 # 3. Migrations que entram nesta atualização
-NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$LATEST_TAG" -- supabase/migrations/ || true)"
+NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$TARGET_SHA" -- supabase/migrations/ || true)"
 
 # Confirma que o serviço está de fato respondendo (não só que o processo subiu).
 # Units são Type=simple: `systemctl restart` retorna sucesso assim que o
@@ -127,7 +134,7 @@ rollback() {
 }
 
 # 4. Atualizar
-git checkout --force "tags/$LATEST_TAG" || rollback
+git checkout --force "$TARGET_SHA" || rollback
 npm ci || rollback
 npm run build || rollback
 
@@ -138,7 +145,7 @@ systemctl --user restart wacrm.service wacrm-worker.service || rollback
 run_healthcheck || rollback
 
 echo ""
-echo "==> Atualizado para $LATEST_TAG com sucesso."
+echo "==> Atualizado para $TARGET_SHA (origin/$BRANCH) com sucesso."
 
 if [ -n "$NEW_MIGRATIONS" ]; then
   echo ""

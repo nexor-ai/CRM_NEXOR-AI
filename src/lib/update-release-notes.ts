@@ -14,6 +14,36 @@ export interface ReleaseNote {
   breaking?: boolean;
 }
 
+/** Espelha o payload de /api/updates: comparação por commit, não por release. */
+export interface UpdateStatus {
+  updateAvailable: boolean;
+  behindBy: number;
+  localCommit: string;
+  remoteCommit: string;
+  changes: string[];
+  publishedAt: string;
+  url: string;
+}
+
+/** Limite de itens listados no modal, para o diálogo não virar um `git log`. */
+const MAX_LISTED_CHANGES = 8;
+
+export function buildCommitUpdateNote(status: UpdateStatus): ReleaseNote {
+  const plural = status.behindBy === 1 ? 'atualização' : 'atualizações';
+  const listed = status.changes.slice(0, MAX_LISTED_CHANGES);
+  const remaining = status.changes.length - listed.length;
+  const changes = listed.length
+    ? [...listed, ...(remaining > 0 ? [`… e mais ${remaining}.`] : [])]
+    : [`${status.behindBy} ${plural} disponíveis no repositório.`];
+
+  return {
+    version: `${status.behindBy} ${plural} pendentes`,
+    date: status.publishedAt.slice(0, 10),
+    changes,
+    breaking: false,
+  };
+}
+
 
 export function formatReleaseDate(value: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);

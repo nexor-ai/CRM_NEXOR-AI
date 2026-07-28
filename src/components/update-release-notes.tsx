@@ -15,7 +15,9 @@ import { formatReleaseDate, type ReleaseNote, type RemoteUpdate } from '@/lib/up
 
 interface UpdateReleaseNotesProps {
   release: ReleaseNote;
-  remote?: RemoteUpdate | null;
+  // Só a URL é consumida aqui; aceitar o formato mínimo deixa o componente
+  // servir tanto ao aviso por release quanto ao aviso por commit.
+  remote?: (Partial<RemoteUpdate> & { url?: string }) | null;
   updateCommand: string;
   onSkip: () => void;
 }
@@ -47,7 +49,7 @@ export function UpdateReleaseNotes({
             Atualização disponível
           </DialogTitle>
           <DialogDescription>
-            Versão {release.version} • {formatReleaseDate(release.date)}
+            {release.version} • {formatReleaseDate(release.date)}
           </DialogDescription>
         </DialogHeader>
 
@@ -95,7 +97,7 @@ export function UpdateReleaseNotes({
             {remote?.url && (
               <p className="mt-2">
                 <a href={remote.url} target="_blank" rel="noreferrer" className="text-primary underline">
-                  Ver a release no GitHub
+                  Ver as mudanças no GitHub
                 </a>
               </p>
             )}
