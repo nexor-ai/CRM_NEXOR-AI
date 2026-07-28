@@ -5,6 +5,12 @@ set -euo pipefail
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${PORT:-3010}"
 UNIT_DIR="$HOME/.config/systemd/user"
+# Mesma resolução de scripts/update.sh:135 e scripts/run-wacrm-prod.py:15 —
+# NEXOR_ENV, quando definida, é o arquivo que o processo real (run-wacrm-
+# prod.py) de fato carrega. Sem isso, instalações que usam NEXOR_ENV para
+# apontar o .env para outro caminho teriam install.sh lendo/criando um
+# arquivo diferente do que os serviços systemd realmente usam.
+ENV_FILE="${NEXOR_ENV:-$INSTALL_DIR/.env}"
 
 echo "==> NEXOR CRM — instalação"
 echo "    Diretório: $INSTALL_DIR"
@@ -30,13 +36,13 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 # 3. Arquivo de ambiente
-if [ ! -f "$INSTALL_DIR/.env" ]; then
-  cp "$INSTALL_DIR/.env.local.example" "$INSTALL_DIR/.env"
-  echo "==> .env criado a partir do exemplo."
-  echo "    PREENCHA $INSTALL_DIR/.env antes de subir os serviços."
+if [ ! -f "$ENV_FILE" ]; then
+  cp "$INSTALL_DIR/.env.local.example" "$ENV_FILE"
+  echo "==> $ENV_FILE criado a partir do exemplo."
+  echo "    PREENCHA $ENV_FILE antes de subir os serviços."
   NEEDS_ENV=1
 else
-  echo "==> .env já existe, mantido."
+  echo "==> $ENV_FILE já existe, mantido."
   NEEDS_ENV=0
 fi
 
@@ -95,28 +101,29 @@ if [ "$NEEDS_ENV" -eq 1 ]; then
   # aqui produziria só um erro de connection string inválida. Instalação
   # segue (build, units) e para no fim como já fazia; a próxima execução de
   # install.sh, depois do .env preenchido, cai no ramo abaixo e aplica tudo.
-  echo "==> .env recém-criado — migrations puladas nesta execução."
-  echo "    Rode scripts/install.sh de novo depois de preencher $INSTALL_DIR/.env"
+  echo "==> $ENV_FILE recém-criado — migrations puladas nesta execução."
+  echo "    Rode scripts/install.sh de novo depois de preencher $ENV_FILE"
   echo "    para aplicá-las."
 else
   # Mesma precedência de scripts/update.sh: variável já presente no ambiente
-  # do shell (override deliberado do operador) vence; .env é só o fallback.
-  # As duas pontas precisam concordar, senão o mesmo .env, no mesmo host,
-  # resolveria para valores diferentes dependendo de qual script rodou.
+  # do shell (override deliberado do operador) vence; ENV_FILE é só o
+  # fallback. As duas pontas precisam concordar, senão o mesmo .env, no
+  # mesmo host, resolveria para valores (e para o MESMO ARQUIVO, via
+  # NEXOR_ENV) diferentes dependendo de qual script rodou.
   if [ -z "${SUPABASE_DB_URL:-}" ]; then
-    SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$INSTALL_DIR/.env")"
+    SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$ENV_FILE")"
     if [ -n "$SUPABASE_DB_URL_FROM_FILE" ]; then
       export SUPABASE_DB_URL="$SUPABASE_DB_URL_FROM_FILE"
-      echo "==> SUPABASE_DB_URL carregada de $INSTALL_DIR/.env"
+      echo "==> SUPABASE_DB_URL carregada de $ENV_FILE"
     fi
   fi
   if [ -z "${SUPABASE_DB_URL:-}" ]; then
     echo "ERRO: SUPABASE_DB_URL não definida (nem no ambiente, nem em" >&2
-    echo "      $INSTALL_DIR/.env)." >&2
+    echo "      $ENV_FILE)." >&2
     echo "      Obtenha a connection string em Supabase → Project Settings →" >&2
     echo "      Database → Connection string (a direta do Postgres, não as" >&2
     echo "      chaves NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) e" >&2
-    echo "      defina SUPABASE_DB_URL em $INSTALL_DIR/.env antes de instalar." >&2
+    echo "      defina SUPABASE_DB_URL em $ENV_FILE antes de instalar." >&2
     echo "      ATENÇÃO — instalações com schema já aplicado à mão (sem tabela" >&2
     echo "      public.schema_migrations): NÃO defina SUPABASE_DB_URL em .env" >&2
     echo "      ainda. Faça backup do banco e rode primeiro, manualmente:" >&2
@@ -162,7 +169,7 @@ systemctl --user daemon-reload
 if [ "$NEEDS_ENV" -eq 1 ]; then
   echo ""
   echo "==> Instalação concluída, serviços NÃO iniciados."
-  echo "    1. Preencha $INSTALL_DIR/.env (inclusive SUPABASE_DB_URL)"
+  echo "    1. Preencha $ENV_FILE (inclusive SUPABASE_DB_URL)"
   echo "    2. Rode: bash scripts/install.sh          (aplica as migrations)"
   echo "    3. Rode: systemctl --user enable --now wacrm.service wacrm-worker.service"
   exit 0

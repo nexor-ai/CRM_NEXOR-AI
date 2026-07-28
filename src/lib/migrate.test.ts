@@ -12,6 +12,7 @@ import {
   parseMigrationFilename,
   resolveBaselineSet,
   sanitizeConnectionString,
+  shouldRefuseUnbaselinedExistingSchema,
   sortAndValidateMigrationFilenames,
 } from "../../scripts/migrate.mjs";
 
@@ -161,6 +162,56 @@ describe("resolveBaselineSet", () => {
   it("com NNN 0 não inclui nada, e com NNN alto inclui tudo", () => {
     expect(resolveBaselineSet(files, 0)).toEqual([]);
     expect(resolveBaselineSet(files, 999)).toEqual(files);
+  });
+});
+
+describe("shouldRefuseUnbaselinedExistingSchema", () => {
+  // Guarda que impede o runner de rodar 001..050 do zero contra um banco que
+  // já tem schema de aplicação aplicado à mão (VPS de produção, cópia do
+  // notebook), o que reexecutaria DELETE/DROP de migrations antigas em cima
+  // de dados reais. Estes testes cobrem a decisão pura; a query real
+  // (pg_class/pg_namespace) mora em scripts/migrate.mjs e não é testável sem
+  // banco — se a guarda for removida ou a condição enfraquecida, estes casos
+  // falham.
+
+  it("recusa: schema_migrations vazia, sem --baseline, com tabelas de aplicação presentes", () => {
+    expect(
+      shouldRefuseUnbaselinedExistingSchema({
+        appliedRecordsCount: 0,
+        baselineRequested: false,
+        applicationTableCount: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("segue: schema_migrations vazia, sem --baseline, mas nenhuma tabela de aplicação (banco genuinamente zerado)", () => {
+    expect(
+      shouldRefuseUnbaselinedExistingSchema({
+        appliedRecordsCount: 0,
+        baselineRequested: false,
+        applicationTableCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("segue: schema_migrations vazia, mas --baseline foi pedido agora (é o comando que resolve o caso)", () => {
+    expect(
+      shouldRefuseUnbaselinedExistingSchema({
+        appliedRecordsCount: 0,
+        baselineRequested: true,
+        applicationTableCount: 5,
+      }),
+    ).toBe(false);
+  });
+
+  it("segue: schema_migrations já tem registros (runner já rodou nesta instalação antes)", () => {
+    expect(
+      shouldRefuseUnbaselinedExistingSchema({
+        appliedRecordsCount: 43,
+        baselineRequested: false,
+        applicationTableCount: 5,
+      }),
+    ).toBe(false);
   });
 });
 

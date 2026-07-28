@@ -107,10 +107,15 @@ schema velho.
 > instalação já tem o schema aplicado e **não tem** a tabela
 > `public.schema_migrations` (é o caso de qualquer instalação anterior a
 > este runner, como a VPS de produção e a cópia do notebook, ambas em
-> schema `043`), o runner não sabe que já está tudo aplicado: ele vai
-> tentar rodar `001` em diante do zero, incluindo `DELETE`/`DROP` de
-> migrations antigas — **em cima dos dados reais que já existem**. O
-> rollback de código do `update.sh` não desfaz isso.
+> schema `043`), o runner detecta isso sozinho — antes de aplicar qualquer
+> SQL, ele confere se tabelas de aplicação (`contacts`, `conversations`,
+> `messages`, `profiles`, `tags`) já existem em `public` e, se existirem sem
+> nenhum registro em `schema_migrations` e sem `--baseline` na chamada,
+> **recusa rodar e para com erro**, instruindo a fazer o baseline primeiro.
+> Essa recusa é a rede de segurança de última linha, não a primeira: ela só
+> existe porque a documentação sozinha não é garantia contra `DELETE`/`DROP`
+> de migrations antigas em cima de dados reais — o objetivo continua sendo
+> nunca chegar nela, seguindo a ordem certa abaixo.
 >
 > A ordem correta é **baseline antes de `SUPABASE_DB_URL` entrar no
 > `.env`** — nunca o contrário. Faça o procedimento da seção "Instalações
@@ -179,8 +184,16 @@ ele tentar reaplicar as migrations `001` em diante do zero — incluindo
 `DELETE`/`DROP` de migrations antigas (ex.:
 `supabase/migrations/022_contact_phone_dedup.sql` e
 `supabase/migrations/043_atomic_flow_automation_definition_saves.sql`) — **em
-cima dos dados reais já existentes na base**. Siga os passos abaixo nesta
-ordem, sem pular nenhum:
+cima dos dados reais já existentes na base**.
+
+O runner detecta esse caso sozinho: antes de aplicar qualquer SQL, se
+`schema_migrations` está vazia e nenhum `--baseline` foi passado, ele
+verifica se alguma tabela de aplicação (`contacts`, `conversations`,
+`messages`, `profiles`, `tags`) já existe em `public`; se existir, recusa
+rodar e imprime instrução para fazer o baseline primeiro. Isso é uma trava
+de última linha — não decida contar com ela: siga os passos abaixo, nesta
+ordem, sem pular nenhum, para nunca depender de ser barrado no último
+segundo:
 
 1. **Backup.** Faça um dump completo do banco antes de tocar em qualquer
    comando abaixo (`pg_dump`, ou o backup/snapshot do painel do Supabase).

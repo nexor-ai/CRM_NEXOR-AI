@@ -105,6 +105,50 @@ export function resolveBaselineSet(orderedFilenames, baselineNNN) {
   });
 }
 
+// Nomes de tabela criados por supabase/migrations/001_initial_schema.sql,
+// específicos o bastante para não colidir com nada que um projeto Supabase
+// zerado possa pré-criar em `public` por conta de uma extensão habilitada
+// (ex.: PostGIS cria `spatial_ref_sys`) — por isso a checagem abaixo é "essas
+// tabelas de aplicação existem", nunca "o schema public não está vazio", que
+// daria falso positivo num projeto genuinamente zerado.
+export const APPLICATION_TABLE_PROBE = [
+  "contacts",
+  "conversations",
+  "messages",
+  "profiles",
+  "tags",
+];
+
+/**
+ * Decide se o runner deve recusar rodar contra um banco que já tem schema de
+ * aplicação, mas nenhum registro em `schema_migrations` (nem baseline sendo
+ * feito agora) — é exatamente o cenário em que `pending` seria `001..050`
+ * inteiro e o runner tentaria recriar/reprocessar tabelas que já têm dados
+ * reais, incluindo os `DELETE`/`DROP` de migrations como `022` e `043`.
+ *
+ * Só recusa quando as três condições valem ao mesmo tempo:
+ *   - `appliedRecordsCount === 0`: schema_migrations está vazia (banco nunca
+ *     rodou o runner, ou rodou e não tem nada — mesma situação de risco).
+ *   - `baselineRequested` é falso: se `--baseline` foi passado, é
+ *     exatamente o comando que resolve esse caso — deixa passar.
+ *   - `applicationTableCount > 0`: existe pelo menos uma das tabelas de
+ *     `APPLICATION_TABLE_PROBE` em `public` — sinal de schema de aplicação
+ *     já presente, aplicado por fora do runner.
+ *
+ * Lógica pura, sem tocar banco — o `count(*)` que alimenta
+ * `applicationTableCount` é responsabilidade de quem chama (camada de
+ * banco, abaixo).
+ */
+export function shouldRefuseUnbaselinedExistingSchema({
+  appliedRecordsCount,
+  baselineRequested,
+  applicationTableCount,
+}) {
+  if (baselineRequested) return false;
+  if (appliedRecordsCount > 0) return false;
+  return applicationTableCount > 0;
+}
+
 /** Lê supabase/migrations/*.sql do disco, ordenado e validado. */
 export function discoverMigrationFiles(dir) {
   const filenames = readdirSync(dir).filter((name) => name.endsWith(".sql"));
@@ -268,6 +312,26 @@ async function fetchAppliedRecords(client) {
   return rows;
 }
 
+/**
+ * Conta quantas das tabelas de `APPLICATION_TABLE_PROBE` já existem em
+ * `public`. Usa `pg_class`/`pg_namespace` (não `to_regclass`, que resolve
+ * pelo `search_path`) para que uma tabela de mesmo nome em outro schema no
+ * search_path do usuário de conexão não possa satisfazer a checagem —
+ * queremos saber especificamente sobre `public`, o schema onde este runner
+ * cria e altera objetos.
+ */
+async function countApplicationTables(client) {
+  const { rows } = await client.query(
+    `select count(*) as n
+     from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind = 'r'
+       and n.nspname = 'public'
+       and c.relname = any($1::text[])`,
+    [APPLICATION_TABLE_PROBE],
+  );
+  return Number(rows[0].n);
+}
+
 function parseArgs(argv) {
   const args = { dryRun: false, baseline: undefined };
   for (let i = 0; i < argv.length; i++) {
@@ -349,6 +413,42 @@ async function main() {
     await acquireAdvisoryLock(client);
     await ensureMigrationsTable(client);
     const appliedRecords = await fetchAppliedRecords(client);
+
+    // Guarda de segurança: schema_migrations vazia (nunca rodou o runner) e
+    // nenhum --baseline pedido agora é exatamente a situação em que uma
+    // instalação com schema aplicado à mão (VPS de produção, cópia do
+    // notebook, ou qualquer clone anterior a este runner) faria `pending`
+    // virar 001..050 inteiro — reaplicando `create table` em objetos que já
+    // existem e rodando de novo os `DELETE`/`DROP` de migrations como 022 e
+    // 043 em cima de dados reais. Só entra em cena quando appliedRecords já
+    // está vazia, então custa uma query extra apenas nesse caminho raro, não
+    // em toda execução normal do runner.
+    if (appliedRecords.length === 0 && args.baseline === undefined) {
+      const applicationTableCount = await countApplicationTables(client);
+      if (
+        shouldRefuseUnbaselinedExistingSchema({
+          appliedRecordsCount: appliedRecords.length,
+          baselineRequested: args.baseline !== undefined,
+          applicationTableCount,
+        })
+      ) {
+        console.error(
+          `[migrate] Este banco já tem tabelas de aplicação (${APPLICATION_TABLE_PROBE.join(", ")} — ` +
+            "verificação encontrou ao menos uma) mas não tem a tabela de controle " +
+            "public.schema_migrations preenchida. Isso indica uma instalação com " +
+            "schema aplicado manualmente, de antes deste runner existir. Aplicar " +
+            "001 em diante do zero seria destrutivo: recriaria tabelas existentes " +
+            "e reexecutaria DELETE/DROP de migrations antigas em cima de dados " +
+            "reais. Rode primeiro, com backup feito e o número certo confirmado " +
+            "(ver README.md, seção \"Instalações com schema aplicado à mão " +
+            '(--baseline)"):\n' +
+            "  SUPABASE_DB_URL=... node scripts/migrate.mjs --baseline NNN\n" +
+            "e só depois rode este comando de novo sem --baseline.",
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
 
     if (args.baseline !== undefined) {
       if (appliedRecords.length > 0) {
