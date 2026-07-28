@@ -41,11 +41,29 @@ fi
 # 3. Migrations que entram nesta atualização
 NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$LATEST_TAG" -- supabase/migrations/ || true)"
 
+# Confirma que o serviço está de fato respondendo (não só que o processo subiu).
+# Units são Type=simple: `systemctl restart` retorna sucesso assim que o
+# processo é forkado, sem esperar a aplicação responder. Por isso todo
+# restart (no fluxo principal e no rollback) precisa ser seguido deste check.
+run_healthcheck() {
+  echo "==> Aguardando o serviço responder..."
+  local ok=0
+  for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/version"; then
+      ok=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$ok" -eq 1 ]
+}
+
 rollback() {
   echo ""
   echo "!!! FALHA NA ATUALIZAÇÃO — restaurando $PREVIOUS_SHA" >&2
 
   local failed_steps=""
+  local restart_ok=1
 
   git checkout --force "$PREVIOUS_SHA" \
     || failed_steps="${failed_steps}  - git checkout --force $PREVIOUS_SHA\n"
@@ -54,7 +72,11 @@ rollback() {
   npm run build \
     || failed_steps="${failed_steps}  - npm run build\n"
   systemctl --user restart wacrm.service wacrm-worker.service \
-    || failed_steps="${failed_steps}  - systemctl --user restart wacrm.service wacrm-worker.service\n"
+    || { failed_steps="${failed_steps}  - systemctl --user restart wacrm.service wacrm-worker.service\n"; restart_ok=0; }
+
+  if [ "$restart_ok" -eq 1 ] && ! run_healthcheck; then
+    failed_steps="${failed_steps}  - healthcheck pós-restart: o serviço foi reiniciado, mas não respondeu em http://127.0.0.1:$PORT/api/version\n"
+  fi
 
   if [ -z "$failed_steps" ]; then
     echo "!!! Versão anterior restaurada com sucesso. Log completo em $LOG_FILE" >&2
@@ -92,16 +114,7 @@ npm run build || rollback
 systemctl --user restart wacrm.service wacrm-worker.service || rollback
 
 # 6. Healthcheck
-echo "==> Aguardando o serviço responder..."
-OK=0
-for _ in $(seq 1 30); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/version"; then
-    OK=1
-    break
-  fi
-  sleep 2
-done
-[ "$OK" -eq 1 ] || rollback
+run_healthcheck || rollback
 
 echo ""
 echo "==> Atualizado para $LATEST_TAG com sucesso."
