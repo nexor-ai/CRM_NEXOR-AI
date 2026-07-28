@@ -380,6 +380,12 @@ BEGIN
   ) ON CONFLICT (account_id, message_id) DO NOTHING;
   RETURN NEW;
 END $$;
+-- messages é tabela quente e recebe INSERT do webhook o tempo todo. DROP/CREATE
+-- TRIGGER pega SHARE ROW EXCLUSIVE: sem lock_timeout a migration fica presa atrás
+-- de qualquer escrita longa e passa a bloquear as escritas seguintes — apagão de
+-- recebimento. Mesmo padrão de 045 e 048: falha rápido, basta repetir depois.
+SET lock_timeout = '5s';
 DROP TRIGGER IF EXISTS messages_enqueue_audio_transcription ON messages;
 CREATE TRIGGER messages_enqueue_audio_transcription
   AFTER INSERT ON messages FOR EACH ROW EXECUTE FUNCTION enqueue_audio_transcription();
+RESET lock_timeout;
