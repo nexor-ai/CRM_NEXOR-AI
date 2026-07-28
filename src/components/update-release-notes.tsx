@@ -1,6 +1,7 @@
 'use client';
 
-import { RefreshCw, ArrowUpCircle, Check } from 'lucide-react';
+import { useState } from 'react';
+import { ArrowUpCircle, Check, Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -10,22 +11,32 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  formatReleaseDate,
-  type ReleaseNote,
-  buildGenericReleaseNote,
-  type RemoteUpdate,
-} from '@/lib/update-release-notes';
+import { formatReleaseDate, type ReleaseNote, type RemoteUpdate } from '@/lib/update-release-notes';
 
 interface UpdateReleaseNotesProps {
   release: ReleaseNote;
   remote?: RemoteUpdate | null;
-  onUpdate: () => void;
+  updateCommand: string;
   onSkip: () => void;
 }
 
-export function UpdateReleaseNotes({ release, remote, onUpdate, onSkip }: UpdateReleaseNotesProps) {
-  const hasUpdateSteps = Boolean(remote?.changelog?.trim());
+export function UpdateReleaseNotes({
+  release,
+  remote,
+  updateCommand,
+  onSkip,
+}: UpdateReleaseNotesProps) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyCommand() {
+    try {
+      await navigator.clipboard.writeText(updateCommand);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  }
 
   return (
     <Dialog open onOpenChange={(nextOpen) => !nextOpen && onSkip()}>
@@ -62,39 +73,38 @@ export function UpdateReleaseNotes({ release, remote, onUpdate, onSkip }: Update
             </div>
           )}
 
-          {hasUpdateSteps && (
-            <div className="rounded-md border border-border bg-muted/40 p-4 text-sm">
-              <h4 className="mb-2 font-medium">Como atualizar seu clone:</h4>
-              <ol className="list-inside list-decimal space-y-1 text-muted-foreground">
-                <li>Abra a pasta do NEXOR CRM na sua VPS/servidor.</li>
-                <li>Execute: git pull</li>
-                <li>Execute: npm install</li>
-                <li>Execute: npm run build</li>
-                <li>Execute: npm run start:prod</li>
-              </ol>
-              {remote?.url && (
-                <p className="mt-2">
-                  <a
-                    href={remote.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary underline"
-                  >
-                    Abrir release no GitHub
-                  </a>
-                </p>
-              )}
+          <div className="border-border bg-muted/40 rounded-md border p-4 text-sm">
+            <h4 className="mb-2 font-medium">Como atualizar</h4>
+            <p className="text-muted-foreground mb-3">
+              Abra o terminal do servidor onde o NEXOR CRM está instalado, entre na
+              pasta do projeto e execute:
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="bg-background border-border flex-1 overflow-x-auto rounded border px-3 py-2 font-mono text-xs">
+                {updateCommand}
+              </code>
+              <Button variant="outline" size="sm" onClick={copyCommand} className="gap-1 shrink-0">
+                {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied ? 'Copiado' : 'Copiar'}
+              </Button>
             </div>
-          )}
+            <p className="text-muted-foreground mt-3 text-xs">
+              O script atualiza, reconstrói e reinicia os serviços. Se algo falhar, ele
+              restaura sozinho a versão anterior.
+            </p>
+            {remote?.url && (
+              <p className="mt-2">
+                <a href={remote.url} target="_blank" rel="noreferrer" className="text-primary underline">
+                  Ver a release no GitHub
+                </a>
+              </p>
+            )}
+          </div>
         </div>
 
-        <DialogFooter className="gap-2">
+        <DialogFooter>
           <Button variant="ghost" onClick={onSkip}>
-            Depois
-          </Button>
-          <Button onClick={onUpdate} className="gap-2">
-            <RefreshCw className="h-4 w-4" />
-            Recarregar e aplicar agora
+            Fechar
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw, Sparkles } from 'lucide-react';
-import { shouldPromptForUpdate } from '@/lib/app-version';
-import { getReleaseNote, buildGenericReleaseNote, type RemoteUpdate } from '@/lib/update-release-notes';
+import { shouldPromptForUpdate, shouldPromptForRelease } from '@/lib/app-version';
+import { buildGenericReleaseNote, type RemoteUpdate } from '@/lib/update-release-notes';
 import { Button } from '@/components/ui/button';
 import { UpdateReleaseNotes } from '@/components/update-release-notes';
 import {
@@ -15,113 +15,92 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-const CURRENT_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? 'development';
-const DISMISSED_KEY = 'nexor-crm-dismissed-version';
-const CHECK_INTERVAL_MS = 60_000;
-const GITHUB_CHECK_INTERVAL_MS = 5 * 60_000;
+const CURRENT_BUILD = process.env.NEXT_PUBLIC_APP_VERSION ?? 'development';
+const CURRENT_RELEASE = process.env.NEXT_PUBLIC_APP_RELEASE ?? 'development';
+const DISMISSED_RELEASE_KEY = 'nexor-crm-dismissed-release';
+const BUILD_CHECK_INTERVAL_MS = 60_000;
+const RELEASE_CHECK_INTERVAL_MS = 30 * 60_000;
+const UPDATE_COMMAND = 'bash scripts/update.sh';
 
 export function AppUpdatePrompt() {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<'release-notes' | 'generic'>('generic');
-  const [release, setRelease] = useState<ReturnType<typeof getReleaseNote>>(null);
+  const [rebuildOpen, setRebuildOpen] = useState(false);
   const [remote, setRemote] = useState<RemoteUpdate | null>(null);
+  const lastReleaseCheck = useRef(0);
 
-  const promptIfNewer = useCallback(
-    (availableVersion: string, nextMode: 'release-notes' | 'generic', nextRelease: ReturnType<typeof getReleaseNote>, nextRemote: RemoteUpdate | null) => {
-      if (!availableVersion || availableVersion === 'development') return;
-      if (CURRENT_VERSION === 'development') return;
-      if (availableVersion === CURRENT_VERSION) return;
-      const dismissed = window.sessionStorage.getItem(DISMISSED_KEY);
-      if (dismissed === availableVersion) return;
-
-      setMode(nextMode);
-      setRelease(nextRelease);
-      setRemote(nextRemote);
-      setOpen(true);
-    },
-    []
-  );
-
-  const checkLocalVersion = useCallback(async () => {
+  // Evento 1: o servidor foi reconstruído. Recarregar a aba é a ação correta.
+  const checkBuild = useCallback(async () => {
     try {
-      const response = await fetch(`/api/version?ts=${Date.now()}`, {
-        cache: 'no-store',
-      });
+      const response = await fetch(`/api/version?ts=${Date.now()}`, { cache: 'no-store' });
       if (!response.ok) return;
-      const payload = (await response.json()) as {
-        version?: string;
-        release?: string;
-      };
+      const payload = (await response.json()) as { version?: string };
       if (!payload.version) return;
-      const releaseNote = getReleaseNote(payload.release ?? payload.version);
-      promptIfNewer(payload.version, releaseNote ? 'release-notes' : 'generic', releaseNote, null);
+      if (shouldPromptForUpdate(CURRENT_BUILD, payload.version, null)) {
+        setRebuildOpen(true);
+      }
     } catch {
-      // Version checks must never interrupt the CRM workflow.
+      // Verificação de versão nunca pode interromper o fluxo do CRM.
     }
-  }, [promptIfNewer]);
+  }, []);
 
-  const checkGitHubLatest = useCallback(async () => {
+  // Evento 2: existe release nova no GitHub. Recarregar não resolve — precisa do script.
+  const checkRelease = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastReleaseCheck.current < RELEASE_CHECK_INTERVAL_MS) return;
+    lastReleaseCheck.current = now;
     try {
-      const response = await fetch('/api/updates?ts=' + Date.now(), { cache: 'no-store' });
+      const response = await fetch('/api/updates', { cache: 'no-store' });
       if (!response.ok) return;
       const payload = (await response.json()) as RemoteUpdate & { error?: string };
       if (!payload?.version || payload.error) return;
-      const releaseNote = buildGenericReleaseNote(payload);
-      promptIfNewer(payload.version, 'generic', releaseNote, payload);
+      const dismissed = window.localStorage.getItem(DISMISSED_RELEASE_KEY);
+      if (shouldPromptForRelease(CURRENT_RELEASE, payload.version, dismissed)) {
+        setRemote(payload);
+      }
     } catch {
-      // Internet/release check failures stay silent.
+      // Falha de rede é silenciosa por design.
     }
-  }, [promptIfNewer]);
+  }, []);
 
   useEffect(() => {
-    const initialCheck = window.setTimeout(() => void checkLocalVersion(), 0);
-    const interval = window.setInterval(() => void checkLocalVersion(), CHECK_INTERVAL_MS);
-    const githubInterval = window.setInterval(() => void checkGitHubLatest(), GITHUB_CHECK_INTERVAL_MS);
+    void checkBuild();
+    void checkRelease();
+    const buildTimer = window.setInterval(() => void checkBuild(), BUILD_CHECK_INTERVAL_MS);
+    const releaseTimer = window.setInterval(() => void checkRelease(), RELEASE_CHECK_INTERVAL_MS);
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void checkLocalVersion();
-        void checkGitHubLatest();
+        void checkBuild();
+        void checkRelease(); // já protegido por throttle interno
       }
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
-      window.clearTimeout(initialCheck);
-      window.clearInterval(interval);
-      window.clearInterval(githubInterval);
+      window.clearInterval(buildTimer);
+      window.clearInterval(releaseTimer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [checkLocalVersion, checkGitHubLatest]);
+  }, [checkBuild, checkRelease]);
 
-  function updateNow() {
-    window.location.reload();
-  }
-
-  function updateLater() {
-    if (mode === 'generic' && remote?.version) {
-      window.sessionStorage.setItem(DISMISSED_KEY, remote.version);
+  function dismissRelease() {
+    if (remote?.version) {
+      window.localStorage.setItem(DISMISSED_RELEASE_KEY, remote.version);
     }
-    setOpen(false);
+    setRemote(null);
   }
 
-  const effectiveRelease = release ?? (mode === 'generic' && remote ? buildGenericReleaseNote(remote) : null);
-
-  if (open && effectiveRelease) {
+  if (remote) {
     return (
       <UpdateReleaseNotes
-        release={effectiveRelease}
-        remote={mode === 'generic' ? remote : undefined}
-        onUpdate={updateNow}
-        onSkip={updateLater}
+        release={buildGenericReleaseNote(remote)}
+        remote={remote}
+        updateCommand={UPDATE_COMMAND}
+        onSkip={dismissRelease}
       />
     );
   }
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && updateLater()}>
-      <DialogContent
-        showCloseButton={false}
-        className="border-border bg-popover overflow-hidden p-0 sm:max-w-md"
-      >
+    <Dialog open={rebuildOpen} onOpenChange={(next) => !next && setRebuildOpen(false)}>
+      <DialogContent showCloseButton={false} className="border-border bg-popover overflow-hidden p-0 sm:max-w-md">
         <div className="relative px-6 pt-6 pb-5">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_top_right,color-mix(in_oklab,var(--primary)_18%,transparent),transparent_70%)]" />
           <div className="relative flex items-start gap-4">
@@ -131,23 +110,23 @@ export function AppUpdatePrompt() {
             <DialogHeader className="gap-2 text-left">
               <div className="text-primary flex items-center gap-2 text-xs font-medium tracking-[0.18em] uppercase">
                 <Sparkles className="size-3.5" aria-hidden="true" />
-                Atualização disponível
+                Nova build no servidor
               </div>
-              <DialogTitle className="text-lg">Nova versão do NEXOR CRM</DialogTitle>
+              <DialogTitle className="text-lg">Recarregue para continuar</DialogTitle>
               <DialogDescription className="leading-6">
-                O repositório oficial já tem uma versão mais nova. Recarregue para
-                aplicar e veja as instruções de atualização do clone.
+                O NEXOR CRM foi reconstruído neste servidor. Recarregue a página
+                para carregar a versão nova.
               </DialogDescription>
             </DialogHeader>
           </div>
         </div>
         <DialogFooter className="border-border bg-muted/40 m-0 rounded-none px-6 py-4">
-          <Button variant="ghost" onClick={updateLater}>
+          <Button variant="ghost" onClick={() => setRebuildOpen(false)}>
             Depois
           </Button>
-          <Button onClick={updateNow} className="gap-2">
+          <Button onClick={() => window.location.reload()} className="gap-2">
             <RefreshCw className="size-4" aria-hidden="true" />
-            Atualizar agora
+            Recarregar
           </Button>
         </DialogFooter>
       </DialogContent>
