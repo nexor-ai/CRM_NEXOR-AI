@@ -74,18 +74,57 @@ git log --oneline "$PREVIOUS_SHA..$TARGET_SHA" | sed 's/^/    /'
 # 3. Migrations que entram nesta atualização
 NEW_MIGRATIONS="$(git diff --name-only --diff-filter=A "$PREVIOUS_SHA" "$TARGET_SHA" -- supabase/migrations/ || true)"
 
-# Sem SUPABASE_DB_URL o runner (scripts/migrate.mjs) não consegue conectar no
-# Postgres do cliente. Se há migrations pendentes nesta atualização, aborta
-# aqui — antes do checkout --force do passo 4 tocar em qualquer arquivo — em
-# vez de deixar o código novo subir e falhar mais adiante contra schema velho.
+# SUPABASE_DB_URL normalmente não está no ambiente do shell: fica em .env (ou
+# no arquivo apontado por NEXOR_ENV, ver scripts/run-wacrm-prod.py), que os
+# services systemd carregam por conta própria — update.sh roda fora desse
+# caminho. Sem isso, o guard abaixo abortaria em 100% das atualizações com
+# migration, mesmo com o valor certo já preenchido em .env, recriando por
+# outra via o mesmo travamento permanente que o passo 1 existe para eliminar.
+#
+# Não fazemos `source .env`: é um arquivo de instalação do cliente, não
+# versionado, e um valor com caractere especial (ex.: `$(...)`, crase)
+# executaria como comando num shell que dá `source`. scripts/run-wacrm-prod.py
+# evita isso de propósito (ver seu docstring) fazendo parsing linha a linha em
+# vez de eval/source — replicamos o mesmo parsing aqui, sem tocar em nada além
+# de ler o arquivo.
+read_env_var() {
+  local key="$1" file="$2" line value
+  [ -f "$file" ] || return 0
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1)" || true
+  [ -n "$line" ] || return 0
+  value="${line#"${key}"=}"
+  # remove um par de aspas (simples ou duplas) envolvendo o valor inteiro —
+  # mesma regra do loader Python em run-wacrm-prod.py.
+  if [[ ( "$value" == \"*\" && "$value" == *\" ) || ( "$value" == \'*\' && "$value" == *\' ) ]]; then
+    value="${value:1:-1}"
+  fi
+  printf '%s' "$value"
+}
+
+if [ -z "${SUPABASE_DB_URL:-}" ]; then
+  ENV_FILE="${NEXOR_ENV:-$INSTALL_DIR/.env}"
+  DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$ENV_FILE")"
+  if [ -n "$DB_URL_FROM_FILE" ]; then
+    export SUPABASE_DB_URL="$DB_URL_FROM_FILE"
+    echo "==> SUPABASE_DB_URL carregada de $ENV_FILE"
+  fi
+fi
+
+# Sem SUPABASE_DB_URL (nem no ambiente, nem em .env) o runner
+# (scripts/migrate.mjs) não consegue conectar no Postgres do cliente. Se há
+# migrations pendentes nesta atualização, aborta aqui — antes do checkout
+# --force do passo 4 tocar em qualquer arquivo — em vez de deixar o código
+# novo subir e falhar mais adiante contra schema velho.
 if [ -n "$NEW_MIGRATIONS" ] && [ -z "${SUPABASE_DB_URL:-}" ]; then
-  echo "ERRO: esta atualização inclui migrations novas, mas a variável de" >&2
-  echo "      ambiente SUPABASE_DB_URL não está definida:" >&2
+  echo "ERRO: esta atualização inclui migrations novas, mas a variável" >&2
+  echo "      SUPABASE_DB_URL não está definida (nem no ambiente, nem em" >&2
+  echo "      $ENV_FILE):" >&2
   echo "$NEW_MIGRATIONS" | sed 's/^/        - /' >&2
   echo "      Obtenha a connection string em Supabase → Project Settings →" >&2
   echo "      Database → Connection string (a direta do Postgres, não as" >&2
   echo "      chaves NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) e" >&2
-  echo "      defina SUPABASE_DB_URL antes de rodar update.sh novamente." >&2
+  echo "      defina SUPABASE_DB_URL em $ENV_FILE antes de rodar update.sh" >&2
+  echo "      novamente." >&2
   exit 1
 fi
 
@@ -135,7 +174,23 @@ rollback() {
   fi
 
   if [ -z "$failed_steps" ]; then
-    echo "!!! Versão anterior restaurada com sucesso. Log completo em $LOG_FILE" >&2
+    echo "!!! Versão anterior restaurada com sucesso." >&2
+    # O aviso do topo já rolou para fora da tela nos logs de git checkout /
+    # npm ci / npm run build. Repete em caixa delimitada, no mesmo padrão do
+    # bloco de EMERGÊNCIA abaixo, para ser a última coisa que o operador lê —
+    # senão "restaurada com sucesso" sozinho passa a impressão (errada) de que
+    # o banco também voltou ao estado anterior.
+    if [ -n "$extra_msg" ]; then
+      {
+        echo ""
+        echo "############################################################"
+        echo "# ATENÇÃO: LEIA ANTES DE CONSIDERAR A RECUPERAÇÃO COMPLETA  #"
+        echo "############################################################"
+        echo "$extra_msg"
+        echo "############################################################"
+      } >&2
+    fi
+    echo "!!! Log completo em $LOG_FILE" >&2
   else
     {
       echo ""
@@ -143,6 +198,10 @@ rollback() {
       echo "# EMERGÊNCIA: A RECUPERAÇÃO AUTOMÁTICA FALHOU               #"
       echo "############################################################"
       echo "O CRM PODE ESTAR FORA DO AR neste momento."
+      if [ -n "$extra_msg" ]; then
+        echo ""
+        echo "$extra_msg"
+      fi
       echo ""
       echo "Etapa(s) da recuperação que falharam:"
       echo -e "$failed_steps"
@@ -165,13 +224,27 @@ rollback() {
 git checkout --force "$TARGET_SHA" || rollback
 npm ci || rollback
 
-# 4b. Migrations pendentes — depois de "npm ci" (garante as dependências do
-# runner, ex. o driver `pg`) e antes de "npm run build" e do restart, para o
-# código novo nunca subir contra schema velho.
-if [ -n "$NEW_MIGRATIONS" ]; then
-  echo "==> Aplicando migrations pendentes..."
+# 4b. Migrations — depois de "npm ci" (garante as dependências do runner, ex.
+# o driver `pg`) e antes de "npm run build" e do restart, para o código novo
+# nunca subir contra schema velho.
+#
+# Roda sempre que SUPABASE_DB_URL está definida, não só quando NEW_MIGRATIONS
+# aponta arquivo novo: `git diff --diff-filter=A` só enxerga arquivos
+# ADICIONADOS entre PREVIOUS_SHA e TARGET_SHA. Se o banco está atrasado por
+# qualquer outro motivo — baseline nunca rodado, backup restaurado de um dump
+# antigo, migration aplicada manualmente e pela metade — o runner precisa
+# rodar mesmo sem arquivo novo no diff. O runner já é idempotente e barato
+# ("Nada pendente"), então não custa rodar toda vez. NEW_MIGRATIONS continua
+# sendo o único gatilho do abort forçado acima, que é sobre a garantia mínima
+# desta atualização específica, não sobre o estado geral do banco.
+if [ -n "${SUPABASE_DB_URL:-}" ]; then
+  echo "==> Verificando/aplicando migrations pendentes..."
   node scripts/migrate.mjs \
-    || rollback "O código foi revertido para $PREVIOUS_SHA, mas o BANCO DE DADOS NÃO FOI revertido: migration(ões) que chegaram a ser aplicadas antes da falha continuam no schema, porque rollback de código não desfaz DDL. Verifique manualmente o estado em public.schema_migrations antes de tentar atualizar de novo."
+    || rollback "O código foi revertido para $PREVIOUS_SHA. O BANCO DE DADOS PODE NÃO TER SIDO REVERTIDO: dependendo do ponto em que scripts/migrate.mjs falhou, alguma(s) migration(ões) podem ter sido aplicada(s) e continuam no schema — rollback de código não desfaz DDL (outras causas de falha, como TLS ou connection string inválida, não aplicam DDL nenhum; verifique para saber qual foi o caso). Verifique o estado em public.schema_migrations antes de tentar atualizar de novo."
+elif [ -n "$NEW_MIGRATIONS" ]; then
+  # Não deveria ser alcançável: o guard acima já teria abortado. Mantido como
+  # rede de segurança caso a lógica de SUPABASE_DB_URL mude no futuro.
+  rollback "Esta atualização inclui migrations novas, mas SUPABASE_DB_URL não estava definida no momento de aplicá-las. O código foi revertido; o banco não foi tocado por este runner."
 fi
 
 npm run build || rollback
