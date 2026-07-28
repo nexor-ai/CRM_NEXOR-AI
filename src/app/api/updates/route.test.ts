@@ -91,4 +91,74 @@ describe('GET /api/updates', () => {
 
     expect(res.status).toBe(503);
   });
+
+  it('serve cache vencido em backoff quando resposta não é ok, sem nova chamada logo em seguida', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(releasePayload()), { status: 200 })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const { GET } = await import('./route');
+
+      // Popula o cache com sucesso.
+      await GET();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Vence o TTL de 15 minutos.
+      vi.advanceTimersByTime(15 * 60_000 + 1);
+
+      // Próxima consulta ao GitHub falha (ex.: rate limit).
+      fetchMock.mockResolvedValue(new Response('', { status: 403 }));
+      const res = await GET();
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.tag).toBe('v0.9.0');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // Chamada imediatamente seguinte deve ser servida do cache (backoff),
+      // sem nova ida à rede.
+      const res2 = await GET();
+      expect(res2.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('após o backoff de falha expirar, uma nova chamada de rede acontece', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(releasePayload()), { status: 200 })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const { GET } = await import('./route');
+
+      // Popula o cache com sucesso e vence o TTL normal.
+      await GET();
+      vi.advanceTimersByTime(15 * 60_000 + 1);
+
+      // Falha e serve cache vencido com backoff curto.
+      fetchMock.mockResolvedValueOnce(new Response('', { status: 403 }));
+      await GET();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // Avança além dos 15 minutos do TTL normal (bem além do backoff de 60s).
+      vi.advanceTimersByTime(15 * 60_000 + 1);
+
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify(releasePayload()), { status: 200 })
+      );
+      const res = await GET();
+
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

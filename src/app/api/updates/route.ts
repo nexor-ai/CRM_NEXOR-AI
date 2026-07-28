@@ -6,6 +6,7 @@ export const dynamic = 'force-dynamic';
 const REPO = 'nexor-ai/CRM_NEXOR-AI';
 const RELEASE_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 const CACHE_TTL_MS = 15 * 60_000;
+const STALE_CACHE_BACKOFF_MS = 60_000;
 
 interface LatestRelease {
   version: string;
@@ -41,8 +42,12 @@ export async function GET() {
     });
 
     if (!res.ok) {
-      // Rate limit ou indisponibilidade: serve o cache vencido, se houver.
-      if (cache) return NextResponse.json(cache.data);
+      // Rate limit ou indisponibilidade: serve o cache vencido, se houver,
+      // e adia a próxima tentativa de rede por um curto backoff.
+      if (cache) {
+        cache = { ...cache, expiresAt: now + STALE_CACHE_BACKOFF_MS };
+        return NextResponse.json(cache.data);
+      }
       return NextResponse.json(
         { error: 'Não foi possível consultar atualizações agora.' },
         { status: 503 }
@@ -79,7 +84,10 @@ export async function GET() {
     cache = { data, expiresAt: now + CACHE_TTL_MS };
     return NextResponse.json(data);
   } catch {
-    if (cache) return NextResponse.json(cache.data);
+    if (cache) {
+      cache = { ...cache, expiresAt: now + STALE_CACHE_BACKOFF_MS };
+      return NextResponse.json(cache.data);
+    }
     return NextResponse.json(
       { error: 'Falha ao consultar atualizações no GitHub.' },
       { status: 503 }
