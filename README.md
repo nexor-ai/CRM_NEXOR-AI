@@ -32,24 +32,6 @@ CRM operacional da **NEXOR AI** para centralizar atendimento via WhatsApp, conta
 - Uma instância da Evolution API configurada para o número de WhatsApp.
 - Variáveis de ambiente válidas. **Nunca versionar arquivos `.env` ou chaves.**
 
-## Self-hosted / Cliente final
-
-Este repositório é preparado para ser clonado, construído e empacotado para produção.
-O fluxo recomendado para atualizar uma instância self-hosted é:
-
-```bash
-git pull
-npm install
-npm run build
-python3 scripts/promote-wacrm-production.py
-npm run start:prod
-```
-
-Observação:
-- Nunca execute esses passos em produção sem validação e backup.
-- As credenciais devem ser inseridas apenas no `.env` local.
-- Alterações de infraestrutura, DNS, firewall, banco remoto e publicação exigem aprovação humana.
-
 ## Desenvolvimento local
 
 ```bash
@@ -62,6 +44,51 @@ npm run dev
 ```
 
 Abra `http://localhost:3000`. O acesso autenticado depende da configuração do Supabase.
+
+## Instalação em servidor próprio
+
+Requisitos: Linux com systemd, Node 20+, Python 3, git e uma conta Supabase.
+
+```bash
+git clone https://github.com/nexor-ai/CRM_NEXOR-AI.git
+cd CRM_NEXOR-AI
+bash scripts/install.sh
+```
+
+O script valida os requisitos, instala dependências, constrói o projeto,
+registra os serviços `wacrm` e `wacrm-worker` no systemd do usuário e sobe tudo
+na porta 3010. Para usar outra porta: `PORT=3020 bash scripts/install.sh`.
+
+Na primeira execução ele cria o `.env` a partir do `.env.local.example` e para,
+esperando que você preencha as credenciais. Depois de preencher:
+
+```bash
+systemctl --user enable --now wacrm.service wacrm-worker.service
+```
+
+Aplique as migrations de `supabase/migrations/` no seu projeto Supabase, em
+ordem numérica.
+
+## Atualização
+
+O CRM avisa dentro da interface quando existe uma versão nova. Para aplicar,
+no terminal do servidor, dentro da pasta do projeto:
+
+```bash
+bash scripts/update.sh
+```
+
+O script busca a última release, reconstrói, reinicia os serviços e confere se
+o CRM voltou a responder. Se qualquer etapa falhar, ele restaura sozinho a
+versão anterior. Se a atualização trouxer migrations novas, elas são listadas ao
+final — aplique-as no Supabase.
+
+Comandos úteis:
+
+```bash
+systemctl --user status wacrm.service
+journalctl --user -u wacrm.service -f
+```
 
 ## Variáveis de ambiente
 
