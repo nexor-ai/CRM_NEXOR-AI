@@ -100,6 +100,24 @@ migrations novas e a variável não estiver definida, `update.sh` aborta antes
 de mexer em qualquer arquivo, para não deixar código novo rodando contra
 schema velho.
 
+> **PARE antes de definir `SUPABASE_DB_URL` numa instalação já existente.**
+> `update.sh` roda `scripts/migrate.mjs` sempre que `SUPABASE_DB_URL` está
+> definida — não só quando esta atualização específica trouxe migration
+> nova (o runner também cobre banco atrasado por outros motivos). Se a sua
+> instalação já tem o schema aplicado e **não tem** a tabela
+> `public.schema_migrations` (é o caso de qualquer instalação anterior a
+> este runner, como a VPS de produção e a cópia do notebook, ambas em
+> schema `043`), o runner não sabe que já está tudo aplicado: ele vai
+> tentar rodar `001` em diante do zero, incluindo `DELETE`/`DROP` de
+> migrations antigas — **em cima dos dados reais que já existem**. O
+> rollback de código do `update.sh` não desfaz isso.
+>
+> A ordem correta é **baseline antes de `SUPABASE_DB_URL` entrar no
+> `.env`** — nunca o contrário. Faça o procedimento da seção "Instalações
+> com schema aplicado à mão (`--baseline`)", em "Banco de dados e
+> migrações" abaixo, primeiro; só depois de concluído é seguro salvar
+> `SUPABASE_DB_URL` em `.env` e rodar `update.sh` normalmente.
+
 O script detecta sozinho a porta da instalação (lendo a unit systemd
 `wacrm.service`), então não é preciso repetir `PORT=...` na hora de atualizar
 mesmo que a instalação tenha usado uma porta customizada. Para forçar outra
@@ -124,7 +142,10 @@ Use [`.env.local.example`](./.env.local.example) como referência. As variáveis
 - `SUPABASE_DB_URL` — connection string direta do Postgres (não é chave de
   API), exigida por `scripts/install.sh` e `scripts/update.sh` para aplicar
   migrations automaticamente. Ver comentário em `.env.local.example` para
-  onde pegar o valor no painel do Supabase.
+  onde pegar o valor no painel do Supabase. **Instalação já existente, com
+  schema aplicado à mão?** Não coloque esta variável em `.env` ainda — leia
+  primeiro o aviso na seção [Atualização](#atualização) e o procedimento de
+  `--baseline` em "Banco de dados e migrações" abaixo.
 
 Para parâmetros e migração do transporte WhatsApp, consulte [`docs/whatsapp-evolution-upgrade.md`](./docs/whatsapp-evolution-upgrade.md).
 
@@ -154,32 +175,70 @@ SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs
 Uma instalação que já tem o schema no banco — porque as migrations foram
 rodadas manualmente antes deste runner existir — **não tem** a tabela de
 controle `public.schema_migrations`. Rodar o runner nela sem preparo faria
-ele tentar reaplicar as migrations `001` em diante do zero (`create table`
-etc. em objetos que já existem), quebrando a instalação. Para essas
-instalações, o primeiro passo é registrar como já aplicado, sem executar,
-tudo até o número de schema que o banco de fato tem hoje (`--baseline`
-exige a tabela de controle vazia — só funciona nessa janela, antes de
-qualquer migration ter sido de fato aplicada pelo runner):
+ele tentar reaplicar as migrations `001` em diante do zero — incluindo
+`DELETE`/`DROP` de migrations antigas (ex.:
+`supabase/migrations/022_contact_phone_dedup.sql` e
+`supabase/migrations/043_atomic_flow_automation_definition_saves.sql`) — **em
+cima dos dados reais já existentes na base**. Siga os passos abaixo nesta
+ordem, sem pular nenhum:
 
-```bash
-# 1. Baseline: registra 001..NNN como já aplicadas, sem rodar SQL nenhum.
-SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs --baseline NNN
+1. **Backup.** Faça um dump completo do banco antes de tocar em qualquer
+   comando abaixo (`pg_dump`, ou o backup/snapshot do painel do Supabase).
+   Sem isso, um `NNN` errado no passo 3 não tem como ser desfeito.
 
-# 2. Execução normal: aplica só o que vem depois de NNN.
-SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs
-```
+2. **Confirme o `NNN` real do schema desta instalação** — o número da
+   última migration que já está de fato aplicada no banco, não um palpite.
+   Formas de confirmar:
+   - Se existe registro de deploy/changelog interno de quais migrations
+     foram rodadas manualmente, use esse número.
+   - Na dúvida, compare o schema atual com o conteúdo de
+     `supabase/migrations/`, do arquivo de maior número para o menor: abra
+     cada `NNN_descricao.sql` e verifique se os objetos que ele cria/altera
+     (tabela, coluna, índice) já existem no banco (via `psql \d` ou o Table
+     Editor do Supabase). O primeiro `NNN`, descendo, cujos objetos já
+     existem é o baseline correto.
+   - `--baseline` errado para MAIS que o real deixa migrations intermediárias
+     de fora do controle (elas nunca serão aplicadas nem revalidadas).
+     `--baseline` errado para MENOS que o real faz o passo 4 reaplicar
+     migrations já rodadas, incluindo as destrutivas citadas acima. Não
+     prossiga com um número que você não confirmou.
 
-Duas instalações estão hoje nessa situação, ambas com schema em `043`: a VPS
-de produção e a cópia no notebook. Nas duas, o procedimento é:
+3. **Baseline:** registra `001..NNN` como já aplicadas, sem rodar SQL
+   nenhum (`--baseline` exige a tabela de controle vazia — só funciona
+   nessa janela, antes de qualquer migration ter sido de fato aplicada
+   pelo runner). Rode com `SUPABASE_DB_URL` só na linha de comando, **sem**
+   ainda tê-la salvo em `.env`:
+
+   ```bash
+   SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs --baseline NNN
+   ```
+
+4. **Confira antes de aplicar de verdade:**
+
+   ```bash
+   SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs --dry-run
+   ```
+
+   O que aparecer listado deve ser só o que vem depois de `NNN` — se
+   aparecer alguma migration `<= NNN`, pare e revise o número do passo 2
+   antes de continuar.
+
+5. **Só agora** salve `SUPABASE_DB_URL` em `.env` e rode
+   `node scripts/migrate.mjs` (ou deixe `update.sh` rodar normalmente daqui
+   em diante).
+
+Duas instalações estão hoje nessa situação, ambas com schema confirmado em
+`043`: a VPS de produção e a cópia no notebook. Nas duas, os passos 3–4 são:
 
 ```bash
 SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs --baseline 043
-SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs   # aplica 044..050
+SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs --dry-run   # confere: só o que vem depois de 043
+SUPABASE_DB_URL=postgres://... node scripts/migrate.mjs             # aplica as posteriores a 043
 ```
 
 Depois do baseline feito uma vez, essas instalações seguem o fluxo normal —
-`update.sh` (ou execuções manuais do runner) só aplicam o que vier depois de
-`050`.
+`update.sh` (ou execuções manuais do runner) só aplicam o que vier depois do
+que já está registrado.
 
 ## Verificação
 

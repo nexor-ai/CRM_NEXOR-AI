@@ -99,20 +99,35 @@ if [ "$NEEDS_ENV" -eq 1 ]; then
   echo "    Rode scripts/install.sh de novo depois de preencher $INSTALL_DIR/.env"
   echo "    para aplicá-las."
 else
-  SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$INSTALL_DIR/.env")"
-  if [ -z "$SUPABASE_DB_URL_FROM_FILE" ]; then
-    echo "ERRO: SUPABASE_DB_URL não definida em $INSTALL_DIR/.env." >&2
+  # Mesma precedência de scripts/update.sh: variável já presente no ambiente
+  # do shell (override deliberado do operador) vence; .env é só o fallback.
+  # As duas pontas precisam concordar, senão o mesmo .env, no mesmo host,
+  # resolveria para valores diferentes dependendo de qual script rodou.
+  if [ -z "${SUPABASE_DB_URL:-}" ]; then
+    SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$INSTALL_DIR/.env")"
+    if [ -n "$SUPABASE_DB_URL_FROM_FILE" ]; then
+      export SUPABASE_DB_URL="$SUPABASE_DB_URL_FROM_FILE"
+      echo "==> SUPABASE_DB_URL carregada de $INSTALL_DIR/.env"
+    fi
+  fi
+  if [ -z "${SUPABASE_DB_URL:-}" ]; then
+    echo "ERRO: SUPABASE_DB_URL não definida (nem no ambiente, nem em" >&2
+    echo "      $INSTALL_DIR/.env)." >&2
     echo "      Obtenha a connection string em Supabase → Project Settings →" >&2
     echo "      Database → Connection string (a direta do Postgres, não as" >&2
     echo "      chaves NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) e" >&2
     echo "      defina SUPABASE_DB_URL em $INSTALL_DIR/.env antes de instalar." >&2
-    echo "      Instalações com schema já aplicado à mão (sem tabela" >&2
-    echo "      public.schema_migrations) precisam rodar antes:" >&2
+    echo "      ATENÇÃO — instalações com schema já aplicado à mão (sem tabela" >&2
+    echo "      public.schema_migrations): NÃO defina SUPABASE_DB_URL em .env" >&2
+    echo "      ainda. Faça backup do banco e rode primeiro, manualmente:" >&2
     echo "        SUPABASE_DB_URL=... node scripts/migrate.mjs --baseline NNN" >&2
+    echo "      Só depois do baseline concluído é seguro salvar SUPABASE_DB_URL" >&2
+    echo "      em .env e prosseguir. Ver README.md, seção \"Banco de dados e" >&2
+    echo "      migrações\"." >&2
     exit 1
   fi
   echo "==> Aplicando migrations pendentes..."
-  SUPABASE_DB_URL="$SUPABASE_DB_URL_FROM_FILE" node scripts/migrate.mjs || {
+  node scripts/migrate.mjs || {
     echo "ERRO: falha ao aplicar migrations. O CÓDIGO E O ESTADO DO BANCO PODEM TER" >&2
     echo "      DIVERGIDO: dependendo de qual migration falhou, parte delas já" >&2
     echo "      pode ter sido aplicada e fica registrada em public.schema_migrations," >&2
