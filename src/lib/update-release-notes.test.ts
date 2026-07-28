@@ -1,30 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatReleaseDate,
-  getReleaseNote,
-  getUpdatePromptMode,
+  buildGenericReleaseNote,
+  type RemoteUpdate,
 } from './update-release-notes';
 
-describe('release note lookup', () => {
-  it('returns the mapped release note for a known build', () => {
-    expect(getReleaseNote('0.8.0')).toMatchObject({
-      version: '0.8.0',
-      date: '2026-07-25',
-    });
-  });
+const remote: RemoteUpdate = {
+  version: '0.9.0',
+  tag: 'v0.9.0',
+  name: 'NEXOR CRM v0.9.0',
+  changelog: '- Canais manuais\n- Transcrição assíncrona\n',
+  publishedAt: '2026-07-28',
+  url: 'https://github.com/nexor-ai/CRM_NEXOR-AI/releases/tag/v0.9.0',
+};
 
-  it('selects the generic prompt when a build has no mapped release note', () => {
-    expect(getReleaseNote('build-without-release-notes')).toBeNull();
-    expect(getUpdatePromptMode('build-without-release-notes')).toBe('generic');
-  });
-
-  it('formats release dates as calendar dates without UTC day rollover', () => {
+describe('formatReleaseDate', () => {
+  it('formata como data de calendário, sem virada de dia por UTC', () => {
     expect(formatReleaseDate('2026-07-25')).toBe('25/07/2026');
   });
+});
 
-  it('selects release notes for a mapped build', () => {
-    expect(getUpdatePromptMode('0.8.0')).toBe(
-      'release-notes'
-    );
+describe('buildGenericReleaseNote', () => {
+  it('converte o corpo da release em bullets', () => {
+    const note = buildGenericReleaseNote(remote);
+    expect(note.version).toBe('0.9.0');
+    expect(note.date).toBe('2026-07-28');
+    expect(note.changes).toEqual([
+      'Canais manuais',
+      'Transcrição assíncrona',
+    ]);
+  });
+
+  it('cai num texto padrão quando a release não tem corpo', () => {
+    const note = buildGenericReleaseNote({ ...remote, changelog: '' });
+    expect(note.changes).toHaveLength(1);
+    expect(note.changes[0]).toContain('0.9.0');
   });
 });
