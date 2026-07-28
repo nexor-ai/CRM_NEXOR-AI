@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useTotalUnread } from "@/hooks/use-total-unread";
 import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import {
+  Activity,
   Bell,
   Bot,
   Crown,
@@ -16,6 +17,7 @@ import {
   LogOut,
   MessageSquare,
   Radio,
+  Rss,
   Settings,
   Shield,
   User,
@@ -99,6 +101,8 @@ const navItems: NavItem[] = [
   { href: "/automations", label: "Automações", icon: Zap },
   { href: "/flows", label: "Fluxos", icon: Workflow, beta: true },
   { href: "/agents", label: "Agentes de IA", icon: Bot },
+  { href: "/channels", label: "Channels", icon: Rss },
+  { href: "/reliability", label: "Confiabilidade", icon: Activity },
 ];
 
 const bottomNavItems = [

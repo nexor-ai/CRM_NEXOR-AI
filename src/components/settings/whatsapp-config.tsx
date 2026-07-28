@@ -11,8 +11,8 @@ import {
   Zap,
   AlertTriangle,
   RotateCcw,
+  Plus,
 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -32,6 +32,12 @@ const MASKED_TOKEN = '••••••••••••••••';
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
 type ResetReason = 'token_corrupted' | 'evolution_api_error' | null;
+type ConfigItem = WhatsAppConfigType & {
+  department_id?: string | null;
+  is_default?: boolean;
+  department?: { id: string; name: string; is_default: boolean } | null;
+};
+type DepartmentItem = { id: string; name: string; is_default: boolean };
 
 // Evolution sometimes returns `qrcode.base64` as a bare base64 PNG payload
 // (no `data:` prefix) instead of a ready-to-use data URL. A real QR PNG's
@@ -48,13 +54,13 @@ function toQrImageSrc(raw: string | null | undefined): string | null {
 }
 
 export function WhatsAppConfig() {
-  const supabase = createClient();
   // After multi-user, whatsapp_config is one-row-per-account, not
   // one-row-per-user. We pull `accountId` straight off the auth
   // context and key every read off it — so a teammate who just
   // joined an account sees the inviter's saved config without
   // having to re-enter anything.
   const { user, accountId, loading: authLoading, profileLoading } = useAuth();
+  const userId = user?.id;
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -62,7 +68,11 @@ export function WhatsAppConfig() {
   const [refreshingQr, setRefreshingQr] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
-  const [config, setConfig] = useState<WhatsAppConfigType | null>(null);
+  const [config, setConfig] = useState<ConfigItem | null>(null);
+  const [configs, setConfigs] = useState<ConfigItem[]>([]);
+  const [departments, setDepartments] = useState<DepartmentItem[]>([]);
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -80,6 +90,18 @@ export function WhatsAppConfig() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [tokenEdited, setTokenEdited] = useState(false);
 
+  const hydrateForm = useCallback((item: ConfigItem | null) => {
+    setConfig(item);
+    setEvolutionBaseUrl(item?.evolution_base_url || 'http://127.0.0.1:8080');
+    setEvolutionInstance(item?.evolution_instance || '');
+    setAccessToken(item ? MASKED_TOKEN : '');
+    setSelectedDepartmentId(item?.department_id || '');
+    setQrCode(null);
+    setTokenEdited(false);
+    setRegistrationProbe(null);
+    setConnectionStatus(item?.connection_state === 'open' ? 'connected' : 'disconnected');
+  }, []);
+
   const isRegistered = config?.connection_state === 'open';
   const [verifyingRegistration, setVerifyingRegistration] = useState(false);
   type RegistrationProbe = {
@@ -91,74 +113,39 @@ export function WhatsAppConfig() {
     useState<RegistrationProbe | null>(null);
 
 
-  const fetchConfig = useCallback(async (acctId: string) => {
+  const fetchConfig = useCallback(async (_acctId: string) => {
+    void _acctId;
     setLoading(true);
     try {
-      // Load form values from Supabase (shows what's in DB).
-      // Switched from `user_id` (which would only match the row's
-      // original author) to `account_id` so every member of the
-      // account sees the same saved configuration. UNIQUE(account_id)
-      // on the table guarantees the .maybeSingle() return type
-      // remains accurate.
-      const { data, error } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', acctId)
-        .maybeSingle();
-
-      if (error) {
-        console.error('Failed to load config row:', error);
+      const [configRes, departmentRes] = await Promise.all([
+        fetch('/api/whatsapp/config'),
+        fetch('/api/departments'),
+      ]);
+      const payload = await configRes.json();
+      const departmentPayload = await departmentRes.json();
+      if (!configRes.ok && configRes.status !== 409) throw new Error(payload.error || 'config_load_failed');
+      const items = (payload.configurations ?? []) as ConfigItem[];
+      const departmentItems = (departmentPayload.departments ?? []) as DepartmentItem[];
+      setConfigs(items);
+      setDepartments(departmentItems);
+      setIsCreating(false);
+      const selected = items.find((item) => item.id === payload.selected_config_id)
+        ?? items.find((item) => item.is_default)
+        ?? items[0]
+        ?? null;
+      hydrateForm(selected);
+      if (!selected && departmentItems.length > 0) {
+        setSelectedDepartmentId((departmentItems.find((item) => item.is_default) ?? departmentItems[0]).id);
       }
-
-      if (data) {
-        setConfig(data);
-        setEvolutionBaseUrl(data.evolution_base_url || '');
-        setEvolutionInstance(data.evolution_instance || '');
-        setAccessToken(MASKED_TOKEN);
-        setQrCode(null);
-        setTokenEdited(false);
-      } else {
-        setConfig(null);
-        setEvolutionBaseUrl('http://127.0.0.1:8080');
-        setEvolutionInstance('');
-        setAccessToken('');
-        setQrCode(null);
-        setTokenEdited(false);
-      }
-      // Clear any stale probe result when reloading the row.
-      setRegistrationProbe(null);
-
-      // Then verify health via the API (decrypts token + qrCodegs Evolution)
-      if (data) {
-        try {
-          const res = await fetch('/api/whatsapp/config', { method: 'GET' });
-          const payload = await res.json();
-
-          if (payload.connected) {
-            setConnectionStatus('connected');
-            setResetReason(null);
-            setStatusMessage('');
-          } else {
-            setConnectionStatus('disconnected');
-            setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'evolution_api_error' ? 'evolution_api_error' : null);
-            setStatusMessage(payload.message || '');
-          }
-        } catch (err) {
-          console.error('Health check failed:', err);
-          setConnectionStatus('disconnected');
-        }
-      } else {
-        setConnectionStatus('disconnected');
-        setResetReason(null);
-        setStatusMessage('');
-      }
+      setResetReason(null);
+      setStatusMessage(payload.message || '');
     } catch (err) {
       console.error('fetchConfig error:', err);
       toast.error('Não foi possível carregar a configuração do WhatsApp');
     } finally {
       setLoading(false);
     }
-  }, [supabase]);
+  }, [hydrateForm]);
 
   useEffect(() => {
     // Need both the auth session (`!authLoading`) AND the profile
@@ -167,7 +154,7 @@ export function WhatsAppConfig() {
     // for the first render window and bail without ever retrying
     // once the profile arrives.
     if (authLoading || profileLoading) return;
-    if (!user || !accountId) {
+    if (!userId || !accountId) {
       loadedAccountIdRef.current = null;
       setLoading(false);
       return;
@@ -175,7 +162,7 @@ export function WhatsAppConfig() {
     if (loadedAccountIdRef.current === accountId) return;
     loadedAccountIdRef.current = accountId;
     fetchConfig(accountId);
-  }, [authLoading, profileLoading, user?.id, accountId, fetchConfig]);
+  }, [authLoading, profileLoading, userId, accountId, fetchConfig]);
 
   async function handleSave() {
     if (!evolutionBaseUrl.trim()) {
@@ -197,7 +184,10 @@ export function WhatsAppConfig() {
       const payload: Record<string, unknown> = {
         evolution_base_url: evolutionBaseUrl.trim(),
         evolution_instance: evolutionInstance.trim(),
+        department_id: selectedDepartmentId,
       };
+      if (isCreating) payload.create_new = true;
+      else if (config?.id) payload.config_id = config.id;
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
         payload.evolution_api_key = accessToken.trim();
@@ -255,7 +245,8 @@ export function WhatsAppConfig() {
   async function handleTestConnection() {
     try {
       setTesting(true);
-      const res = await fetch('/api/whatsapp/config', { method: 'GET' });
+      if (!config?.id) return;
+      const res = await fetch(`/api/whatsapp/config?config_id=${encodeURIComponent(config.id)}&check=true`, { method: 'GET' });
       const payload = await res.json();
 
       if (payload.connected) {
@@ -285,7 +276,12 @@ export function WhatsAppConfig() {
   async function handleRefreshQr() {
     try {
       setRefreshingQr(true);
-      const res = await fetch('/api/whatsapp/config/qr', { method: 'POST' });
+      if (!config?.id) return;
+      const res = await fetch('/api/whatsapp/config/qr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config_id: config.id }),
+      });
       const data = await res.json();
 
       if (!res.ok) {
@@ -307,7 +303,8 @@ export function WhatsAppConfig() {
     setVerifyingRegistration(true);
     setRegistrationProbe(null);
     try {
-      const res = await fetch('/api/whatsapp/config/verify-registration', {
+      if (!config?.id) return;
+      const res = await fetch(`/api/whatsapp/config/verify-registration?config_id=${encodeURIComponent(config.id)}`, {
         method: 'GET',
       });
       const data = (await res.json()) as RegistrationProbe;
@@ -336,7 +333,8 @@ export function WhatsAppConfig() {
 
     try {
       setResetting(true);
-      const res = await fetch('/api/whatsapp/config', { method: 'DELETE' });
+      if (!config?.id) return;
+      const res = await fetch(`/api/whatsapp/config?config_id=${encodeURIComponent(config.id)}`, { method: 'DELETE' });
       const data = await res.json();
 
       if (!res.ok) {
@@ -345,12 +343,7 @@ export function WhatsAppConfig() {
       }
 
       toast.success('Configuração limpa. Agora você pode inserir suas credenciais de novo.');
-      setConfig(null);
-      setEvolutionBaseUrl('');
-      setEvolutionInstance('');
-      setAccessToken('');
-      setQrCode(null);
-      setTokenEdited(false);
+      if (accountId) await fetchConfig(accountId);
       setConnectionStatus('disconnected');
       setResetReason(null);
       setStatusMessage('');
@@ -382,8 +375,58 @@ export function WhatsAppConfig() {
     <section className="animate-in fade-in-50 duration-200">
       <SettingsPanelHead
         title="Conexão do WhatsApp"
-        description="Conecte sua API Evolution do WhatsApp Business. Credenciais, webhook e passos de configuração ficam todos aqui."
+        description="Gerencie os números e instâncias Evolution por departamento. Nada é conectado ou excluído sem uma ação explícita sua."
       />
+      <Card className="mb-6">
+        <CardHeader className="flex-row items-center justify-between gap-4">
+          <div>
+            <CardTitle className="text-foreground">Instâncias desta conta</CardTitle>
+            <CardDescription>Selecione uma instância para editar, testar, verificar o QR ou excluir.</CardDescription>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setIsCreating(true);
+              hydrateForm(null);
+              const fallback = departments.find((item) => item.is_default) ?? departments[0];
+              setSelectedDepartmentId(fallback?.id ?? '');
+            }}
+          >
+            <Plus className="size-4" />
+            Nova instância
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {configs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => { setIsCreating(false); hydrateForm(item); }}
+                className={`rounded-lg border p-4 text-left transition-colors ${!isCreating && config?.id === item.id ? 'border-primary bg-primary/10' : 'border-border bg-muted/40 hover:bg-muted'}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <strong className="truncate text-sm text-foreground">{item.evolution_instance || 'Instância sem nome'}</strong>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${item.connection_state === 'open' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                    {item.connection_state === 'open' ? 'Conectada' : 'Desconectada'}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">{item.department?.name || 'Departamento não informado'}</p>
+                {item.is_default && <span className="mt-2 inline-block rounded bg-primary/15 px-2 py-0.5 text-[10px] text-primary">Padrão da conta</span>}
+              </button>
+            ))}
+            {configs.length === 0 && !isCreating && (
+              <p className="text-sm text-muted-foreground">Nenhuma instância configurada.</p>
+            )}
+          </div>
+          {isCreating && (
+            <p className="mt-3 rounded-lg border border-primary/40 bg-primary/10 px-4 py-3 text-sm text-foreground">
+              Preparando uma nova instância. A instância padrão atual não será sobrescrita.
+            </p>
+          )}
+        </CardContent>
+      </Card>
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
       <div className="space-y-6">
@@ -540,6 +583,21 @@ export function WhatsAppConfig() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">Departamento responsável</Label>
+              <select
+                value={selectedDepartmentId}
+                onChange={(event) => setSelectedDepartmentId(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-muted px-3 text-sm text-foreground"
+              >
+                <option value="" disabled>Selecione um departamento</option>
+                {departments.map((department) => (
+                  <option key={department.id} value={department.id}>
+                    {department.name}{department.is_default ? ' (padrão)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Nome da instância Evolution</Label>
               <Input
@@ -700,11 +758,11 @@ export function WhatsAppConfig() {
           <Button
             type="button"
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || !selectedDepartmentId}
             className="bg-primary hover:bg-primary/90"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-            Salvar configuração
+            {isCreating ? 'Criar instância' : 'Salvar configuração'}
           </Button>
         </div>
 

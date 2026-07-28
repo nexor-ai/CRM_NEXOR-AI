@@ -24,13 +24,22 @@ ENDPOINTS = (
     "/api/automations/cron",
     "/api/flows/cron",
     "/api/broadcasts/cron",
+    "/api/internal/external-operations/cron",
 )
+ENDPOINT_METHODS = {
+    # Existing cron routes are GET handlers. The outbox worker intentionally
+    # uses POST so an accidental crawler/prefetch cannot dispatch effects.
+    "/api/internal/external-operations/cron": "POST",
+}
 ENDPOINT_TIMEOUTS = {
     # Reconciliation fetches and normalizes a bounded page of Evolution
     # messages serially. Thirty seconds can expire while the server is still
     # making progress, causing the worker to report a false failure and start
     # another reconciliation on the next cycle.
     "/api/internal/evolution/reconcile": 120,
+    # A batch may execute five bounded provider calls serially. Keep the HTTP
+    # client alive long enough to receive the route's final persisted counts.
+    "/api/internal/external-operations/cron": 150,
 }
 
 
@@ -61,7 +70,11 @@ def load_env(path: Path) -> None:
 
 def hit(path: str, secret: str) -> None:
     url = f"http://{HOST}:{PORT}{path}"
-    req = urllib.request.Request(url, headers={"x-cron-secret": secret})
+    req = urllib.request.Request(
+        url,
+        headers={"x-cron-secret": secret},
+        method=ENDPOINT_METHODS.get(path, "GET"),
+    )
     try:
         with urllib.request.urlopen(req, timeout=ENDPOINT_TIMEOUTS.get(path, 30)) as res:
             body = res.read().decode("utf-8", errors="replace")[:500]

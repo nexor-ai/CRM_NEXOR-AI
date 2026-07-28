@@ -45,6 +45,9 @@ export interface EvolutionWebhookConfig {
   headers?: unknown
   byEvents?: boolean
   base64?: boolean
+  /** Evolution 2.3.7 response field names. */
+  webhookByEvents?: boolean
+  webhookBase64?: boolean
   events?: string[]
 }
 
@@ -250,7 +253,10 @@ export async function checkEvolutionHealth(args: EvolutionCredentials & {
     webhookEnabled: webhook.enabled === true,
     webhookUrl: webhook.url === args.expectedWebhookUrl,
     webhookEvents: args.expectedEvents.every(event => actualEvents.has(event.toUpperCase())),
-    webhookBase64: !args.requireBase64 || webhook.base64 === true,
+    webhookBase64:
+      !args.requireBase64 ||
+      webhook.base64 === true ||
+      webhook.webhookBase64 === true,
   }
   const instanceOpen = connection.state === 'open'
   const webhookOperational = Object.values(checks).every(Boolean)

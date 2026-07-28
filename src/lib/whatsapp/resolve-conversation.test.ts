@@ -86,9 +86,14 @@ function makeDb(script: Script): SupabaseClient {
         });
       return Promise.resolve({ data: null, error: null });
     },
-    // Thenable: `await db.from().update().eq()` lands here.
-    then: (resolve: (v: { data: null; error: null }) => void) =>
-      resolve({ data: null, error: null }),
+    // Thenable: active config resolution awaits `.order()`, while
+    // `await db.from().update().eq()` uses the generic mutation result.
+    then: (resolve: (v: { data: unknown; error: null }) => void) =>
+      resolve(
+        table === 'whatsapp_config'
+          ? { data: script.config ? [script.config] : [], error: null }
+          : { data: null, error: null },
+      ),
   };
 
   return {

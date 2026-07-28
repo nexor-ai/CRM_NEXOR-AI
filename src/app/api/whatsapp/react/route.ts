@@ -1,5 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { submitExternalOperation } from '@/lib/external-operations';
+import {
+  createExternalOperationStore,
+  operationHttpStatus,
+} from '@/lib/external-operations/supabase-store';
+import {
+  ForbiddenError,
+  requireRole,
+  toErrorResponse,
+  UnauthorizedError,
+} from '@/lib/auth/account';
 import { sendReactionMessage } from '@/lib/whatsapp/evolution-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
@@ -21,41 +32,18 @@ import {
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
+    const { supabase, accountId, userId } = await requireRole('agent');
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
-    }
-
-    const limit = checkRateLimit(`react:${user.id}`, RATE_LIMITS.react);
+    const limit = checkRateLimit(`react:${userId}`, RATE_LIMITS.react);
     if (!limit.success) {
       return rateLimitResponse(limit);
     }
 
-    // Resolve the caller's account_id so conversation + whatsapp_config
-    // lookups work for teammates who didn't author the rows directly.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('account_id')
-      .eq('user_id', user.id)
-      .maybeSingle();
-    const accountId = profile?.account_id as string | undefined;
-    if (!accountId) {
-      return NextResponse.json(
-        { error: 'Seu perfil não está vinculado a uma conta.' },
-        { status: 403 },
-      );
-    }
-
     const body = await request.json();
-    const { message_id, emoji } = body as {
+    const { message_id, emoji, idempotency_key } = body as {
       message_id?: string;
       emoji?: string;
+      idempotency_key?: string;
     };
 
     if (!message_id || typeof emoji !== 'string') {
@@ -129,73 +117,93 @@ export async function POST(request: Request) {
       );
     }
 
+    // Defense in depth: resolution is account-scoped, but a malformed/custom
+    // resolver result must never route an effect through another tenant.
+    if (config.account_id !== accountId) {
+      return NextResponse.json(
+        { error: 'Configuração do WhatsApp não encontrada' },
+        { status: 404 },
+      );
+    }
+
     if (!config.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
       return NextResponse.json({ error: 'A API Evolution não está configurada.' }, { status: 400 });
     }
     const apiKey = decrypt(config.evolution_api_key);
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
+    const requestId =
+      (typeof idempotency_key === 'string' && idempotency_key.trim()) ||
+      request.headers.get('idempotency-key')?.trim() ||
+      randomUUID();
 
-    try {
-      await sendReactionMessage({
-        baseUrl: config.evolution_base_url,
-        instance: config.evolution_instance,
-        apiKey,
-        to: sanitizedPhone,
-        targetMessageId: targetMessage.message_id,
-        emoji,
-        fromMe: targetMessage.sender_type !== 'customer',
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unknown Evolution API error';
-      console.error('[whatsapp/react] Evolution send failed:', message);
-      return NextResponse.json(
-        { error: `Erro da API Evolution: ${message}` },
-        { status: 502 },
-      );
-    }
-
-    // Mirror into DB. Empty emoji = removal.
-    if (emoji === '') {
-      const { error: delError } = await supabase
-        .from('message_reactions')
-        .delete()
-        .eq('message_id', targetMessage.id)
-        .eq('actor_type', 'agent')
-        .eq('actor_id', user.id);
-
-      if (delError) {
-        console.error('[whatsapp/react] DB delete failed:', delError.message);
-        return NextResponse.json(
-          { error: 'Reação enviada à Evolution, mas a exclusão no banco falhou' },
-          { status: 500 },
-        );
-      }
-    } else {
-      // Upsert. The unique constraint (message_id, actor_type, actor_id)
-      // lets us swap emoji in a single statement.
-      const { error: upsertError } = await supabase.from('message_reactions').upsert(
-        {
-          message_id: targetMessage.id,
-          conversation_id: targetMessage.conversation_id,
-          actor_type: 'agent',
-          actor_id: user.id,
+    const operation = await submitExternalOperation(
+      createExternalOperationStore(),
+      {
+        accountId,
+        whatsappConfigId: config.id,
+        conversationId: targetMessage.conversation_id,
+        messageId: targetMessage.id,
+        operationType: 'reaction',
+        idempotencyKey: requestId,
+        payload: {
+          messageId: targetMessage.id,
+          targetMessageId: targetMessage.message_id,
+          to: sanitizedPhone,
           emoji,
+          fromMe: targetMessage.sender_type !== 'customer',
+          actorId: userId,
         },
-        { onConflict: 'message_id,actor_type,actor_id' },
+        retryPolicy: 'at_most_once',
+        maxAttempts: 1,
+        requestedBy: userId,
+      },
+      async () => {
+        await sendReactionMessage({
+          baseUrl: config.evolution_base_url!,
+          instance: config.evolution_instance!,
+          apiKey,
+          to: sanitizedPhone,
+          targetMessageId: targetMessage.message_id,
+          emoji,
+          fromMe: targetMessage.sender_type !== 'customer',
+        });
+
+        if (emoji === '') {
+          const { error: delError } = await supabase
+            .from('message_reactions')
+            .delete()
+            .eq('message_id', targetMessage.id)
+            .eq('actor_type', 'agent')
+            .eq('actor_id', userId);
+          if (delError) throw new Error(`Reaction mirror delete failed: ${delError.message}`);
+        } else {
+          const { error: upsertError } = await supabase.from('message_reactions').upsert(
+            {
+              message_id: targetMessage.id,
+              conversation_id: targetMessage.conversation_id,
+              actor_type: 'agent',
+              actor_id: userId,
+              emoji,
+            },
+            { onConflict: 'message_id,actor_type,actor_id' },
+          );
+          if (upsertError) throw new Error(`Reaction mirror upsert failed: ${upsertError.message}`);
+        }
+        return { result: { mirrored: true } };
+      },
+    );
+
+    if (operation.status !== 'succeeded') {
+      return NextResponse.json(
+        { success: false, operation_id: operation.id, operation_status: operation.status },
+        { status: operationHttpStatus(operation.status) },
       );
-
-      if (upsertError) {
-        console.error('[whatsapp/react] DB upsert failed:', upsertError.message);
-        return NextResponse.json(
-          { error: 'Reação enviada à Evolution, mas a gravação no banco falhou' },
-          { status: 500 },
-        );
-      }
     }
-
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, operation_id: operation.id });
   } catch (error) {
+    if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
+      return toErrorResponse(error);
+    }
     console.error('Error in WhatsApp react POST:', error);
     return NextResponse.json(
       { error: 'Não foi possível reagir à mensagem' },

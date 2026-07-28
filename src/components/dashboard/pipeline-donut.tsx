@@ -43,9 +43,9 @@ export function PipelineDonut({ data, loading, currency }: PipelineDonutProps) {
                     style={{ background: s.color }}
                     aria-hidden
                   />
-                  <span className="flex-1 truncate text-muted-foreground">{s.name}</span>
+                  <span className="flex-1 truncate text-muted-foreground">{stageLabel(s.name)}</span>
                   <span className="text-muted-foreground tabular-nums">
-                    {s.dealCount} deal{s.dealCount === 1 ? '' : 's'}
+                    {s.dealCount} negócio{s.dealCount === 1 ? '' : 's'}
                   </span>
                   <span className="w-20 text-right text-muted-foreground tabular-nums">
                     {formatCurrencyShort(s.totalValue, currency)}
@@ -58,6 +58,15 @@ export function PipelineDonut({ data, loading, currency }: PipelineDonutProps) {
       </div>
     </section>
   )
+}
+
+function stageLabel(name: string): string {
+  const labels: Record<string, string> = {
+    won: 'Ganho',
+    lost: 'Perdido',
+    open: 'Aberto',
+  }
+  return labels[name.trim().toLowerCase()] ?? name
 }
 
 // ------------------------------------------------------------

@@ -95,6 +95,37 @@ describe('Evolution reliability contracts', () => {
     expect(fetchMock.mock.calls[1][1].redirect).toBe('error');
   });
 
+  it('accepts the Evolution 2.3.7 webhookBase64 response field', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ instance: { state: 'open' } }), {
+          status: 200,
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            enabled: true,
+            url: 'https://crm.example/api/whatsapp/webhook',
+            webhookByEvents: false,
+            webhookBase64: true,
+            events: ['MESSAGES_UPSERT', 'MESSAGES_UPDATE'],
+          }),
+          { status: 200 }
+        )
+      );
+
+    const health = await checkEvolutionHealth({
+      ...credentials,
+      expectedWebhookUrl: 'https://crm.example/api/whatsapp/webhook',
+      expectedEvents: ['MESSAGES_UPSERT', 'MESSAGES_UPDATE'],
+      requireBase64: true,
+    });
+
+    expect(health.healthy).toBe(true);
+    expect(health.checks.webhookBase64).toBe(true);
+  });
+
   it('sends Evolution read-receipt keys', async () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 201 }));
 

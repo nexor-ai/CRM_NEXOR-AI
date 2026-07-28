@@ -1,6 +1,40 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+const transportMocks = vi.hoisted(() => ({
+  sendTemplateMessage: vi.fn(),
+  resolveConfig: vi.fn(),
+}));
+
+vi.mock('@/lib/whatsapp/evolution-api', () => ({
+  INTERACTIVE_LIMITS: {
+    maxButtons: 3,
+    buttonTitleMaxLength: 20,
+    maxListSections: 10,
+    maxListRowsTotal: 10,
+    listRowTitleMaxLength: 24,
+    listRowDescriptionMaxLength: 72,
+  },
+  sendTemplateMessage: transportMocks.sendTemplateMessage,
+  sendTextMessage: vi.fn(),
+  sendMediaMessage: vi.fn(),
+  sendContactMessage: vi.fn(),
+  sendInteractiveButtons: vi.fn(),
+  sendInteractiveList: vi.fn(),
+  sendLocationMessage: vi.fn(),
+  sendPollMessage: vi.fn(),
+  sendStickerMessage: vi.fn(),
+}));
+vi.mock('@/lib/whatsapp/resolve-config', () => ({
+  resolveActiveWhatsAppConfig: transportMocks.resolveConfig,
+  whatsappTrace: vi.fn(() => ({})),
+}));
+vi.mock('@/lib/whatsapp/encryption', () => ({
+  decrypt: vi.fn(() => 'api-key'),
+  encrypt: vi.fn(() => 'encrypted-key'),
+  isLegacyFormat: vi.fn(() => false),
+}));
+
 import {
   sendMessageToConversation,
   SendMessageError,
@@ -104,6 +138,83 @@ describe('sendMessageToConversation — param validation (pre-DB)', () => {
       })
     ).rejects.toThrow('reached DB');
     expect(spy).toHaveBeenCalledWith('conversations');
+  });
+});
+
+describe('sendMessageToConversation — template presets fail closed', () => {
+  const conversation = {
+    id: 'cv-1',
+    account_id: 'acct-1',
+    whatsapp_config_id: 'config-1',
+    contact: { id: 'contact-1', phone: '+15551234567' },
+  };
+
+  function templateDb(template: Record<string, unknown> | null): SupabaseClient {
+    return {
+      from: vi.fn((table: string) => {
+        const data = table === 'conversations' ? conversation : template;
+        const builder: Record<string, unknown> = {};
+        const self = () => builder;
+        for (const method of ['select', 'eq']) builder[method] = vi.fn(self);
+        builder.single = vi.fn(async () => ({ data, error: null }));
+        builder.maybeSingle = vi.fn(async () => ({ data, error: null }));
+        return builder;
+      }),
+    } as unknown as SupabaseClient;
+  }
+
+  async function captureTemplateError(template: Record<string, unknown> | null) {
+    transportMocks.resolveConfig.mockResolvedValueOnce({
+      id: 'config-1',
+      account_id: 'acct-1',
+      evolution_base_url: 'https://evolution.test',
+      evolution_instance: 'instance-1',
+      evolution_api_key: 'encrypted-key',
+    });
+
+    const error = await sendMessageToConversation(templateDb(template), 'acct-1', {
+      conversationId: 'cv-1',
+      messageType: 'template',
+      templateName: 'approved_preset',
+      templateLanguage: 'pt_BR',
+      templateParams: ['Anderson'],
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SendMessageError);
+    expect(transportMocks.sendTemplateMessage).not.toHaveBeenCalled();
+    return error as SendMessageError;
+  }
+
+  it('rejects a missing preset before transport instead of sending its technical name as text', async () => {
+    vi.clearAllMocks();
+    const error = await captureTemplateError(null);
+    expect(error.code).toBe('template_not_found');
+  });
+
+  it('rejects an inactive preset before transport', async () => {
+    vi.clearAllMocks();
+    const error = await captureTemplateError({
+      id: 'template-1',
+      user_id: 'user-1',
+      name: 'approved_preset',
+      language: 'pt_BR',
+      body_text: 'Olá {{1}}',
+      status: 'DISABLED',
+    });
+    expect(error.code).toBe('template_inactive');
+  });
+
+  it('rejects a preset whose identity/language is incompatible with the request', async () => {
+    vi.clearAllMocks();
+    const error = await captureTemplateError({
+      id: 'template-1',
+      user_id: 'user-1',
+      name: 'different_preset',
+      language: 'en_US',
+      body_text: 'Hello {{1}}',
+      status: 'APPROVED',
+    });
+    expect(error.code).toBe('template_incompatible');
   });
 });
 

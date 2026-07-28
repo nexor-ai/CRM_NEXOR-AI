@@ -6,6 +6,8 @@ import { processEvolutionWebhook } from '@/app/api/whatsapp/webhook/route'
 
 type WebhookEventClaim = {
   id: string
+  account_id: string
+  whatsapp_config_id: string
   payload: Record<string, unknown>
   attempts: number
   claim_token: string
@@ -38,7 +40,10 @@ export async function GET(request: Request) {
 
   for (const claim of claims) {
     try {
-      const outcome = await processEvolutionWebhook(claim.payload, 'webhook')
+      const outcome = await processEvolutionWebhook(claim.payload, 'webhook', {
+        accountId: claim.account_id,
+        configId: claim.whatsapp_config_id,
+      })
       const { error: updateError } = await admin.rpc('finish_evolution_webhook_event', {
         event_id_arg: claim.id,
         claim_token_arg: claim.claim_token,

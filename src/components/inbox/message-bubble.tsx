@@ -19,6 +19,7 @@ import {
 import { format } from 'date-fns';
 import { ReplyQuote } from './reply-quote';
 import { MessageReactions } from './message-reactions';
+import { normalizeStoredChatMediaReference } from '@/lib/whatsapp/chat-media';
 import {
   safeInteractiveOptions,
   safePollValues,
@@ -128,6 +129,7 @@ function MessageContent({ message }: { message: Message }) {
       <p className="text-muted-foreground text-sm italic">Mensagem apagada</p>
     );
   }
+  const mediaUrl = normalizeStoredChatMediaReference(message.media_url);
   switch (message.content_type) {
     case 'text':
       return (
@@ -139,8 +141,8 @@ function MessageContent({ message }: { message: Message }) {
     case 'image':
       return (
         <div>
-          {message.media_url ? (
-            <MediaImage url={message.media_url} alt="Imagem compartilhada" />
+          {mediaUrl ? (
+            <MediaImage url={mediaUrl} alt="Imagem compartilhada" />
           ) : (
             <MediaUnavailable label="Image" />
           )}
@@ -155,9 +157,9 @@ function MessageContent({ message }: { message: Message }) {
     case 'video':
       return (
         <div>
-          {message.media_url ? (
+          {mediaUrl ? (
             <video
-              src={message.media_url}
+              src={mediaUrl}
               controls
               className="max-h-64 max-w-60 rounded-lg"
             />
@@ -175,8 +177,8 @@ function MessageContent({ message }: { message: Message }) {
     case 'audio':
       return (
         <div>
-          {message.media_url ? (
-            <audio src={message.media_url} controls className="max-w-60" />
+          {mediaUrl ? (
+            <audio src={mediaUrl} controls className="max-w-60" />
           ) : (
             <MediaUnavailable label="Audio" />
           )}
@@ -184,12 +186,12 @@ function MessageContent({ message }: { message: Message }) {
       );
 
     case 'document':
-      if (!message.media_url) {
+      if (!mediaUrl) {
         return <MediaUnavailable label={message.content_text || 'Document'} />;
       }
       return (
         <a
-          href={message.media_url}
+          href={mediaUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="bg-muted/50 hover:bg-muted flex items-center gap-2 rounded-lg px-3 py-2 text-sm"
@@ -263,8 +265,8 @@ function MessageContent({ message }: { message: Message }) {
     }
 
     case 'sticker':
-      return message.media_url ? (
-        <MediaImage url={message.media_url} alt="Figurinha" />
+      return mediaUrl ? (
+        <MediaImage url={mediaUrl} alt="Figurinha" />
       ) : (
         <MediaUnavailable label="Sticker" />
       );

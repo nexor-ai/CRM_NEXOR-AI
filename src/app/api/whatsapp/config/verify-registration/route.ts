@@ -19,7 +19,7 @@ function expectedWebhookUrl(): string | null {
   return `${base}/api/whatsapp/webhook`
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const supabase = await createClient()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 })
@@ -33,7 +33,11 @@ export async function GET() {
     return NextResponse.json({ live: false, checks: { account: false }, errors: ['No account linked.'] })
   }
 
-  const config = await resolveActiveWhatsAppConfig(supabase, profile.account_id)
+  const explicitConfigId = new URL(request.url).searchParams.get('config_id')
+  const config = await resolveActiveWhatsAppConfig(supabase, profile.account_id, { explicitConfigId })
+  if (explicitConfigId && !config) {
+    return NextResponse.json({ live: false, error: 'config_not_found', checks: { configured: false }, errors: ['Selected configuration was not found.'] }, { status: 404 })
+  }
   if (!config?.evolution_base_url || !config.evolution_instance || !config.evolution_api_key) {
     return NextResponse.json({ live: false, checks: { configured: false }, errors: ['Evolution API is not configured.'] })
   }

@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 function readGitRevision() {
   try {
@@ -15,6 +16,9 @@ const timestamp = new Date()
   .replace(/[-:]/g, '')
   .replace(/\.\d{3}Z$/, 'Z');
 const version = `${readGitRevision()}-${timestamp}`;
+const release = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
 
 console.log(`[build] NEXOR CRM version ${version}`);
 
@@ -22,6 +26,7 @@ const result = spawnSync('next', ['build'], {
   env: {
     ...process.env,
     NEXT_PUBLIC_APP_VERSION: version,
+    NEXT_PUBLIC_APP_RELEASE: release,
   },
   stdio: 'inherit',
   shell: process.platform === 'win32',

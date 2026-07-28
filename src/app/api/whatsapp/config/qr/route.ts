@@ -17,7 +17,12 @@ export async function POST(request: Request) {
   try {
     const { supabase, accountId } = await requireRole('admin')
 
-    const config = await resolveActiveWhatsAppConfig(supabase, accountId)
+    const body = (await request.json().catch(() => ({}))) as { config_id?: unknown }
+    const explicitConfigId = typeof body.config_id === 'string' ? body.config_id : null
+    const config = await resolveActiveWhatsAppConfig(supabase, accountId, { explicitConfigId })
+    if (explicitConfigId && !config) {
+      return NextResponse.json({ error: 'Configuração não encontrada.' }, { status: 404 })
+    }
     if (!config?.evolution_base_url || !config?.evolution_instance || !config?.evolution_api_key) {
       return NextResponse.json({ error: 'Nenhuma configuração da API Evolution foi salva ainda.' }, { status: 400 })
     }

@@ -53,6 +53,30 @@ describe('Evolution 2.3 webhook normalization', () => {
     });
   });
 
+  it('retains audio size and duration metadata for async transcription enqueue', () => {
+    const message = normalizeEvolutionMessage({
+      key: { id: 'audio-id', remoteJid: '5511999999999@s.whatsapp.net' },
+      messageTimestamp: 123,
+      message: {
+        audioMessage: {
+          mimetype: 'audio/ogg',
+          fileLength: '4096',
+          seconds: 18,
+          base64: 'encoded-audio',
+        },
+      },
+    });
+
+    expect(message).toMatchObject({
+      type: 'audio',
+      audio: {
+        mime_type: 'audio/ogg',
+        size_bytes: 4096,
+        duration_seconds: 18,
+      },
+    });
+  });
+
   it('deduplicates reconciliation records from the Evolution response', () => {
     const duplicate = {
       key: { id: 'same-id', remoteJid: '5511999999999@s.whatsapp.net' },

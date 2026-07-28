@@ -1,4 +1,10 @@
+import { randomUUID } from 'node:crypto'
 import { NextResponse } from 'next/server'
+import { submitExternalOperation } from '@/lib/external-operations'
+import {
+  createExternalOperationStore,
+  operationHttpStatus,
+} from '@/lib/external-operations/supabase-store'
 import {
   ForbiddenError,
   requireRole,
@@ -54,6 +60,7 @@ export async function POST(request: Request) {
       template_message_params,
       reply_to_message_id,
       content_data,
+      idempotency_key,
     } = body
 
     if ((!conversationIdInput && !contact_id) || !message_type) {
@@ -149,7 +156,7 @@ export async function POST(request: Request) {
     // `SendMessageError` carries a machine code + HTTP status; the
     // dashboard maps it to the internal `{ error }` shape.
     try {
-      const result = await sendMessageToConversation(supabase, accountId, {
+      const sendParams = {
         conversationId,
         messageType: message_type,
         contentText: content_text,
@@ -161,12 +168,51 @@ export async function POST(request: Request) {
         templateMessageParams: template_message_params,
         replyToMessageId: reply_to_message_id,
         contentData: content_data,
-      })
+      }
+      const requestId =
+        (typeof idempotency_key === 'string' && idempotency_key.trim()) ||
+        request.headers.get('idempotency-key')?.trim() ||
+        randomUUID()
+      const operation = await submitExternalOperation(
+        createExternalOperationStore(),
+        {
+          accountId,
+          conversationId,
+          operationType: 'send_message',
+          idempotencyKey: requestId,
+          payload: sendParams,
+          retryPolicy: 'at_most_once',
+          maxAttempts: 1,
+          requestedBy: userId,
+        },
+        async () => {
+          const result = await sendMessageToConversation(supabase, accountId, sendParams)
+          return {
+            transportId: result.whatsappMessageId,
+            result: {
+              messageId: result.messageId,
+              whatsappMessageId: result.whatsappMessageId,
+            },
+          }
+        },
+      )
 
+      if (operation.status !== 'succeeded') {
+        return NextResponse.json(
+          {
+            success: false,
+            operation_id: operation.id,
+            operation_status: operation.status,
+          },
+          { status: operationHttpStatus(operation.status) },
+        )
+      }
       return NextResponse.json({
         success: true,
-        message_id: result.messageId,
-        whatsapp_message_id: result.whatsappMessageId,
+        operation_id: operation.id,
+        idempotent_replay: operation.attempts > 0,
+        message_id: operation.result?.messageId,
+        whatsapp_message_id: operation.transport_id ?? operation.result?.whatsappMessageId,
       })
     } catch (err) {
       if (err instanceof SendMessageError) {

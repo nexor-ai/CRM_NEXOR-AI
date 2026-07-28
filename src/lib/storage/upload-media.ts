@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
+import { chatMediaReference } from "@/lib/whatsapp/chat-media";
 
 /**
  * Shared media-upload helper for Supabase Storage buckets that use the
@@ -62,7 +63,7 @@ export function buildMediaPath(
 }
 
 export interface UploadAccountMediaResult {
-  /** Public URL Meta can fetch at send time. */
+  /** Stable app reference. Private chat media resolves through an authenticated proxy. */
   publicUrl: string;
   /** Storage object path (account-scoped). */
   path: string;
@@ -109,6 +110,10 @@ export async function uploadAccountMedia(
     contentType: file.type,
   });
   if (upErr) throw new Error(upErr.message);
+
+  if (bucket === "chat-media") {
+    return { publicUrl: chatMediaReference(path), path };
+  }
 
   const {
     data: { publicUrl },

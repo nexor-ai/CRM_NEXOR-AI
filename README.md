@@ -32,6 +32,24 @@ CRM operacional da **NEXOR AI** para centralizar atendimento via WhatsApp, conta
 - Uma instância da Evolution API configurada para o número de WhatsApp.
 - Variáveis de ambiente válidas. **Nunca versionar arquivos `.env` ou chaves.**
 
+## Self-hosted / Cliente final
+
+Este repositório é preparado para ser clonado, construído e empacotado para produção.
+O fluxo recomendado para atualizar uma instância self-hosted é:
+
+```bash
+git pull
+npm install
+npm run build
+python3 scripts/promote-wacrm-production.py
+npm run start:prod
+```
+
+Observação:
+- Nunca execute esses passos em produção sem validação e backup.
+- As credenciais devem ser inseridas apenas no `.env` local.
+- Alterações de infraestrutura, DNS, firewall, banco remoto e publicação exigem aprovação humana.
+
 ## Desenvolvimento local
 
 ```bash

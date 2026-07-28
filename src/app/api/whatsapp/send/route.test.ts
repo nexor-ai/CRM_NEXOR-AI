@@ -57,7 +57,17 @@ function makeSupabaseMock() {
             error: null,
           };
         case 'message_templates':
-          return { data: null, error: null };
+          return {
+            data: {
+              id: 'template-1',
+              user_id: 'user-1',
+              name: 'order_update',
+              language: 'en_US',
+              body_text: 'Order {{1}} updated: {{2}}',
+              status: 'APPROVED',
+            },
+            error: null,
+          };
         default:
           return { data: null, error: null };
       }
@@ -99,6 +109,16 @@ function makeSupabaseMock() {
     ]) {
       b[m] = vi.fn(chain);
     }
+    b.order = vi.fn(() => {
+      if (table === 'whatsapp_config') {
+        const result = selectResult();
+        return Promise.resolve({
+          data: result.data ? [result.data] : [],
+          error: result.error,
+        });
+      }
+      return b;
+    });
     b.limit = vi.fn(() => {
       if (table === 'whatsapp_config') {
         const result = selectResult();
@@ -209,6 +229,23 @@ vi.mock('@/lib/whatsapp/evolution-api', () => ({
   sendTemplateMessage,
   sendTextMessage: vi.fn(),
   sendMediaMessage: vi.fn(),
+}));
+
+vi.mock('@/lib/external-operations/supabase-store', () => ({
+  createExternalOperationStore: vi.fn(() => ({})),
+  operationHttpStatus: vi.fn(() => 202),
+}));
+vi.mock('@/lib/external-operations', () => ({
+  submitExternalOperation: vi.fn(async (_store, input, execute) => {
+    const execution = await execute({ id: 'op-1', payload: input.payload });
+    return {
+      id: 'op-1',
+      status: 'succeeded',
+      attempts: 1,
+      result: execution.result,
+      transport_id: execution.transportId,
+    };
+  }),
 }));
 
 import { POST } from './route';

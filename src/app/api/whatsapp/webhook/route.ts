@@ -15,6 +15,8 @@ import {
   type EvolutionCredentials,
 } from '@/lib/whatsapp/evolution-api';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { persistInboundMedia } from '@/lib/whatsapp/inbound-media';
+import { buildInboundTranscriptionJob } from '@/lib/transcription/enqueue';
 
 export const maxDuration = 60;
 
@@ -68,6 +70,8 @@ type EvolutionMedia = {
   url?: string;
   base64?: string;
   mime_type?: string;
+  size_bytes?: number;
+  duration_seconds?: number;
 };
 
 function asRecord(value: unknown): JsonRecord {
@@ -95,14 +99,19 @@ export async function POST(request: Request) {
   }
   const instance = body.instance || String(asRecord(body.data).instance || '');
   if (!instance) return NextResponse.json({ error: 'Instância Evolution ausente' }, { status: 400 });
+  const accountScope = request.headers.get('x-wacrm-webhook-scope');
+  if (!accountScope) {
+    return NextResponse.json({ error: 'Escopo do webhook ausente' }, { status: 401 });
+  }
 
   const { data: config, error: configError } = await supabaseAdmin()
     .from('whatsapp_config')
     .select('id, account_id')
     .eq('evolution_instance', instance)
+    .eq('account_id', accountScope)
     .is('disabled_at', null)
     .maybeSingle();
-  if (configError || !config || request.headers.get('x-wacrm-webhook-scope') !== config.account_id) {
+  if (configError || !config) {
     console.warn('[webhook] rejected unknown or mismatched Evolution instance');
     return NextResponse.json({ error: 'Instância Evolution desconhecida' }, { status: 401 });
   }
@@ -145,24 +154,27 @@ function canonicalEvolutionEvent(event: unknown): string {
 
 export async function processEvolutionWebhook(
   body: EvolutionWebhookBody,
-  source: 'webhook' | 'reconciliation' = 'webhook'
+  source: 'webhook' | 'reconciliation' = 'webhook',
+  scope: { accountId?: string | null; configId?: string | null } = {}
 ): Promise<'processed' | 'duplicate' | 'ignored'> {
   const event = canonicalEvolutionEvent(body.event);
   const eventData = asRecord(body.data);
   const instance = body.instance || String(eventData.instance || '');
   if (!instance) return 'ignored';
 
-  const { data: configRows, error } = await supabaseAdmin()
+  let configQuery = supabaseAdmin()
     .from('whatsapp_config')
     .select('*')
     .eq('evolution_instance', instance)
-    .is('disabled_at', null)
-    .limit(1);
-  if (error || !configRows?.length) {
+    .is('disabled_at', null);
+  if (scope.accountId) configQuery = configQuery.eq('account_id', scope.accountId);
+  if (scope.configId) configQuery = configQuery.eq('id', scope.configId);
+  const { data: configRows, error } = await configQuery.limit(2);
+  if (error || configRows?.length !== 1) {
     throw new Error(
       error
         ? `Failed to resolve Evolution config: ${error.message}`
-        : `No active Evolution config for instance ${instance}`
+        : `Evolution config resolution is ${configRows?.length ? 'ambiguous' : 'empty'}`
     );
   }
   const config = configRows[0];
@@ -237,7 +249,12 @@ export async function processEvolutionWebhook(
     }
   }
   if (inboundMedia) {
-    await persistInboundMedia(inboundMedia, config.account_id, transportMessageId);
+    await persistInboundMedia(
+      supabaseAdmin(),
+      inboundMedia,
+      config.account_id,
+      transportMessageId
+    );
   }
   await processMessage(
     normalized,
@@ -250,6 +267,7 @@ export async function processEvolutionWebhook(
     {
       id: config.id,
       instance: config.evolution_instance,
+      departmentId: config.department_id ?? null,
       accountPhone: body.sender
         ? String(body.sender)
         : data.sender
@@ -260,45 +278,6 @@ export async function processEvolutionWebhook(
     }
   );
   return 'processed';
-}
-
-const INBOUND_MEDIA_MAX_BYTES = 16 * 1024 * 1024;
-const SAFE_INBOUND_MIME = /^(image\/(jpeg|png|webp)|video\/(mp4|3gpp)|audio\/(ogg|mpeg|mp4|aac)|application\/(pdf|octet-stream))$/i;
-
-async function persistInboundMedia(
-  media: { url?: string; base64?: string; mime_type?: string; filename?: string },
-  accountId: string,
-  transportMessageId: string
-): Promise<void> {
-  const mime = String(media.mime_type || 'application/octet-stream').split(';')[0].trim();
-  if (!SAFE_INBOUND_MIME.test(mime)) {
-    throw new Error(`Unsupported inbound media MIME type: ${mime}`);
-  }
-  if (media.base64) {
-    const clean = media.base64.replace(/^data:[^;]+;base64,/, '');
-    const bytes = Buffer.from(clean, 'base64');
-    if (bytes.length === 0 || bytes.length > INBOUND_MEDIA_MAX_BYTES) {
-      throw new Error('Inbound media exceeds the controlled size limit');
-    }
-    const extension = mime.split('/')[1]?.replace('jpeg', 'jpg') || 'bin';
-    const safeId = transportMessageId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
-    const path = `account-${accountId}/inbound/${safeId}.${extension}`;
-    const { error } = await supabaseAdmin().storage.from('chat-media').upload(path, bytes, {
-      contentType: mime,
-      cacheControl: '3600',
-      upsert: false,
-    });
-    if (error && !/already exists|duplicate/i.test(error.message)) {
-      throw new Error(`Could not persist inbound media: ${error.message}`);
-    }
-    media.url = supabaseAdmin().storage.from('chat-media').getPublicUrl(path).data.publicUrl;
-    delete media.base64;
-    return;
-  }
-  if (media.url) {
-    const url = new URL(media.url);
-    if (url.protocol !== 'https:') throw new Error('Inbound media URL must use HTTPS');
-  }
 }
 
 export function extractEvolutionMessageRecords(payload: unknown): JsonRecord[] {
@@ -413,7 +392,8 @@ export async function reconcileEvolutionMessages(
     const summary = await processReconciliationRecords(records, (record) =>
       processEvolutionWebhook(
         { event: 'MESSAGES_UPSERT', instance: args.instance, data: record },
-        'reconciliation'
+        'reconciliation',
+        { configId: args.configId }
       )
     );
     let telemetryUpdate = supabaseAdmin()
@@ -614,6 +594,8 @@ export function normalizeEvolutionMessage(
           url: rootMediaUrl ?? (media.url ? String(media.url) : undefined),
           base64:
             rootBase64 ?? (media.base64 ? String(media.base64) : undefined),
+          size_bytes: Number(media.fileLength || 0),
+          duration_seconds: Number(media.seconds || 0),
         },
       };
     }
@@ -857,7 +839,12 @@ async function processMessage(
   contact: { profile: { name: string }; wa_id: string },
   accountId: string,
   configOwnerUserId: string,
-  config: { id: string; instance: string | null; accountPhone: string | null }
+  config: {
+    id: string;
+    instance: string | null;
+    accountPhone: string | null;
+    departmentId?: string | null;
+  }
 ) {
   const senderPhone = normalizePhone(message.from);
   const contactOutcome = await findOrCreateContact(
@@ -953,6 +940,31 @@ async function processMessage(
   }
   if (!internalMessageId) throw new Error('Inbound message id was not persisted');
 
+  if (messageWasInserted && message.audio) {
+    const transcriptionJob = buildInboundTranscriptionJob({
+      accountId,
+      messageId: internalMessageId,
+      conversationId: conversation.id,
+      whatsappConfigId: config.id,
+      departmentId: config.departmentId ?? null,
+      mediaReference: message.audio.url,
+      mimeType: message.audio.mime_type,
+      sizeBytes: message.audio.size_bytes,
+      durationSeconds: message.audio.duration_seconds,
+    });
+    if (transcriptionJob) {
+      const { error: transcriptionError } = await supabaseAdmin()
+        .from('transcription_jobs')
+        .upsert(transcriptionJob, {
+          onConflict: 'account_id,message_id',
+          ignoreDuplicates: true,
+        });
+      if (transcriptionError) {
+        throw new Error(`Failed to enqueue transcription: ${transcriptionError.message}`);
+      }
+    }
+  }
+
   if (messageWasInserted) {
     const { error: conversationUpdateError } = await supabaseAdmin().rpc(
       'increment_inbound_conversation',
@@ -1039,6 +1051,8 @@ async function processMessage(
         contactId: contactRecord.id,
         conversationId: conversation.id,
         configOwnerUserId,
+        whatsappConfigId: config.id,
+        departmentId: config.departmentId ?? null,
       });
       return { completed: true };
     });

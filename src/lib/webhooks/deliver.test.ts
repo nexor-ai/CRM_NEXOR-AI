@@ -6,13 +6,12 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
   encrypt: (s: string) => s,
 }));
 
-// Control the SSRF guard per-test.
-vi.mock('@/lib/webhooks/ssrf', () => ({
-  isDeliverableUrl: vi.fn(async () => true),
+vi.mock('@/lib/webhooks/pinned-request', () => ({
+  postJsonToPinnedPublicUrl: vi.fn(),
 }));
 
 import { dispatchWebhookEvent, MAX_CONSECUTIVE_FAILURES } from './deliver';
-import { isDeliverableUrl } from './ssrf';
+import { postJsonToPinnedPublicUrl } from './pinned-request';
 
 interface Row {
   id: string;
@@ -58,15 +57,15 @@ function makeDb(rows: Row[], calls: Calls) {
 const emptyCalls = (): Calls => ({ updates: [], rpcs: [] });
 
 beforeEach(() => {
-  vi.mocked(isDeliverableUrl).mockResolvedValue(true);
+  vi.clearAllMocks();
+  vi.mocked(postJsonToPinnedPublicUrl).mockResolvedValue(200);
   vi.stubGlobal('fetch', vi.fn());
 });
 afterEach(() => vi.unstubAllGlobals());
 
 describe('dispatchWebhookEvent', () => {
-  it('signs + POSTs (no redirect follow) and resets failure_count on success', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
-    vi.stubGlobal('fetch', fetchMock);
+  it('signs + POSTs through the pinned helper and resets failure_count on success', async () => {
+    const fetchMock = vi.mocked(fetch);
     const calls = emptyCalls();
 
     await dispatchWebhookEvent(
@@ -76,20 +75,21 @@ describe('dispatchWebhookEvent', () => {
       { x: 1 }
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, opts] = fetchMock.mock.calls[0];
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(postJsonToPinnedPublicUrl).toHaveBeenCalledTimes(1);
+    const [url, body, headers = {}] = vi.mocked(postJsonToPinnedPublicUrl).mock.calls[0];
     expect(url).toBe('https://a.test/hook');
-    expect(opts.redirect).toBe('manual');
-    expect(opts.headers['X-Wacrm-Event']).toBe('message.received');
-    expect(opts.headers['X-Wacrm-Signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
+    expect(headers['X-Wacrm-Event']).toBe('message.received');
+    expect(headers['X-Wacrm-Webhook-Id']).toBe('a');
+    expect(headers['X-Wacrm-Signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
     // Payload carries a dedupe id.
-    expect(JSON.parse(opts.body).id).toMatch(/[0-9a-f-]{36}/);
+    expect(JSON.parse(body).id).toMatch(/[0-9a-f-]{36}/);
     expect(calls.updates[0]).toMatchObject({ id: 'a', payload: { failure_count: 0 } });
     expect(calls.rpcs).toHaveLength(0);
   });
 
   it('records an atomic failure (RPC) when the endpoint errors', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 } as Response));
+    vi.mocked(postJsonToPinnedPublicUrl).mockResolvedValue(500);
     const calls = emptyCalls();
 
     await dispatchWebhookEvent(
@@ -103,23 +103,23 @@ describe('dispatchWebhookEvent', () => {
       name: 'record_webhook_failure',
       args: { endpoint_id: 'b', max_failures: MAX_CONSECUTIVE_FAILURES },
     });
+    expect(postJsonToPinnedPublicUrl).toHaveBeenCalledTimes(1);
     expect(calls.updates).toHaveLength(0);
   });
 
-  it('blocks a non-public target (SSRF guard) without fetching', async () => {
-    vi.mocked(isDeliverableUrl).mockResolvedValue(false);
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+  it('records an atomic failure when the pinned request times out', async () => {
+    vi.mocked(postJsonToPinnedPublicUrl).mockRejectedValue(new Error('request timed out'));
     const calls = emptyCalls();
 
     await dispatchWebhookEvent(
-      makeDb([{ id: 'c', url: 'https://127.0.0.1/hook', secret: 's3' }], calls),
+      makeDb([{ id: 'c', url: 'https://c.test/hook', secret: 's3' }], calls),
       'acct-1',
       'message.received',
       {}
     );
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(postJsonToPinnedPublicUrl).toHaveBeenCalledTimes(1);
     expect(calls.rpcs[0].name).toBe('record_webhook_failure');
   });
 

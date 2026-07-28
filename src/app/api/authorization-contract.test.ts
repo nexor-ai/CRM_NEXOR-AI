@@ -46,3 +46,19 @@ describe('Flows and Automations authorization contract', () => {
     expect(source).not.toContain('.eq("user_id"')
   })
 })
+
+describe('Evolution webhook multi-instance authorization contract', () => {
+  const webhookSource = readFileSync(join(API_ROOT, 'whatsapp/webhook/route.ts'), 'utf8')
+  const workerSource = readFileSync(join(API_ROOT, 'internal/evolution/cron/route.ts'), 'utf8')
+
+  it('requires account scope before resolving a repeated instance name', () => {
+    expect(webhookSource).toContain("request.headers.get('x-wacrm-webhook-scope')")
+    expect(webhookSource).toContain(".eq('account_id', accountScope)")
+    expect(webhookSource).toMatch(/configRows\?\.length !== 1/)
+  })
+
+  it('propagates durable account and config identity into the worker', () => {
+    expect(workerSource).toContain('accountId: claim.account_id')
+    expect(workerSource).toContain('configId: claim.whatsapp_config_id')
+  })
+})

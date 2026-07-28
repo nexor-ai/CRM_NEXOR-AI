@@ -23,12 +23,9 @@ import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { decrypt } from '@/lib/whatsapp/encryption';
+import { postJsonToPinnedPublicUrl } from '@/lib/webhooks/pinned-request';
 import { buildSignatureHeader } from '@/lib/webhooks/sign';
-import { isDeliverableUrl } from '@/lib/webhooks/ssrf';
 import type { WebhookEvent } from '@/lib/webhooks/events';
-
-/** Per-endpoint HTTP timeout. Kept short — this runs in `after()`. */
-export const DELIVERY_TIMEOUT_MS = 5000;
 
 /** Auto-disable an endpoint after this many consecutive failures. */
 export const MAX_CONSECUTIVE_FAILURES = 15;
@@ -90,15 +87,6 @@ async function deliverOne(
   payload: string,
   tsSeconds: number
 ): Promise<void> {
-  // SSRF guard: refuse to POST to a host that resolves to a private /
-  // loopback / link-local address. Counts as a failure so a
-  // misconfigured internal URL surfaces and eventually auto-disables.
-  if (!(await isDeliverableUrl(row.url))) {
-    console.warn('[webhooks] refusing non-public delivery target for', row.id);
-    await recordFailure(db, row);
-    return;
-  }
-
   let secret: string;
   try {
     secret = decrypt(row.secret);
@@ -111,22 +99,12 @@ async function deliverOne(
   }
 
   try {
-    const res = await fetch(row.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Wacrm-Event': event,
-        'X-Wacrm-Webhook-Id': row.id,
-        'X-Wacrm-Signature': buildSignatureHeader(payload, secret, tsSeconds),
-      },
-      body: payload,
-      // Do NOT follow redirects — a public URL could 3xx-bounce to an
-      // internal address, bypassing the SSRF check above. A 3xx is a
-      // misconfiguration; treat it as a failure.
-      redirect: 'manual',
-      signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+    const status = await postJsonToPinnedPublicUrl(row.url, payload, {
+      'X-Wacrm-Event': event,
+      'X-Wacrm-Webhook-Id': row.id,
+      'X-Wacrm-Signature': buildSignatureHeader(payload, secret, tsSeconds),
     });
-    if (!res.ok) throw new Error(`endpoint responded ${res.status}`);
+    if (status < 200 || status >= 300) throw new Error(`endpoint responded ${status}`);
 
     // Success: clear the failure streak.
     await db

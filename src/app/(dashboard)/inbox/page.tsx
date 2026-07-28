@@ -191,9 +191,9 @@ export default function InboxPage() {
         .from("whatsapp_config")
         .select("status")
         .eq("account_id", accountId)
-        .maybeSingle();
+        .is("disabled_at", null);
 
-      setWhatsappConnected(data?.status === "connected");
+      setWhatsappConnected((data ?? []).some((item) => item.status === "connected"));
     };
 
     checkConnection();

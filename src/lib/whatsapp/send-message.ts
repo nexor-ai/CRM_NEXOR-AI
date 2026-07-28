@@ -45,6 +45,10 @@ import {
 import type { MessageTemplate } from '@/types';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
 import {
+  chatMediaPathFromReference,
+  isChatMediaPathForAccount,
+} from '@/lib/whatsapp/chat-media';
+import {
   resolveActiveWhatsAppConfig,
   whatsappTrace,
 } from '@/lib/whatsapp/resolve-config';
@@ -398,6 +402,7 @@ export async function sendMessageToConversation(
   // without a stamp fall back to the account's active configuration.
   const config = await resolveActiveWhatsAppConfig(db, accountId, {
     preferConfigId: conversation.whatsapp_config_id ?? null,
+    departmentId: conversation.department_id ?? null,
   });
 
   if (!config) {
@@ -472,25 +477,78 @@ export async function sendMessageToConversation(
     }
   }
 
-  // Template row (for header + button components). isMessageTemplate
-  // guards against a malformed local row crashing the send-builder.
+  // Template rows are local presets, not remote provider templates. Resolve them
+  // fail-closed: a missing/inactive/incompatible preset must never reach
+  // sendTemplateMessage, whose low-level compatibility fallback can render the
+  // technical template name as text. Interactive-message fallbacks are a
+  // separate, explicitly approved contract and remain unchanged.
   let templateRow: MessageTemplate | null = null;
   if (messageType === 'template' && templateName) {
-    const { data } = await db
+    const requestedLanguage = templateLanguage || 'en_US';
+    const { data, error } = await db
       .from('message_templates')
       .select('*')
       .eq('account_id', accountId)
       .eq('name', templateName)
-      .eq('language', templateLanguage || 'en_US')
+      .eq('language', requestedLanguage)
       .maybeSingle();
-    if (data && !isMessageTemplate(data)) {
+    if (error) {
+      throw new SendMessageError(
+        'template_lookup_failed',
+        'Could not verify the local template preset',
+        500
+      );
+    }
+    if (!data) {
+      throw new SendMessageError(
+        'template_not_found',
+        'Template preset not found',
+        404
+      );
+    }
+    if (!isMessageTemplate(data)) {
       throw new SendMessageError(
         'template_malformed',
         'Template row is malformed locally — run "review the local preset" in Settings to repair it.',
         500
       );
     }
-    templateRow = data ?? null;
+    if (data.name !== templateName || data.language !== requestedLanguage) {
+      throw new SendMessageError(
+        'template_incompatible',
+        'Template preset does not match the requested name and language',
+        409
+      );
+    }
+    if (data.status !== 'APPROVED') {
+      throw new SendMessageError(
+        'template_inactive',
+        'Template preset is not active',
+        409
+      );
+    }
+    templateRow = data;
+  }
+
+  let transportMediaUrl = mediaUrl || null;
+  if (transportMediaUrl) {
+    const privatePath = chatMediaPathFromReference(transportMediaUrl);
+    if (privatePath) {
+      if (!isChatMediaPathForAccount(privatePath, accountId)) {
+        throw new SendMessageError('not_found', 'Media not found', 404);
+      }
+      const { data, error } = await db.storage
+        .from('chat-media')
+        .createSignedUrl(privatePath, 60);
+      if (error || !data?.signedUrl) {
+        throw new SendMessageError(
+          'media_unavailable',
+          'Private media could not be prepared for delivery',
+          502
+        );
+      }
+      transportMediaUrl = data.signedUrl;
+    }
   }
 
   const attempt = async (phone: string): Promise<string> => {
@@ -513,7 +571,7 @@ export async function sendMessageToConversation(
         ...transport,
         to: phone,
         kind: messageType as MediaKind,
-        link: mediaUrl!,
+        link: transportMediaUrl!,
         caption: contentText || undefined,
         filename: filename || undefined,
         contextMessageId,
