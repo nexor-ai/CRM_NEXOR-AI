@@ -5,13 +5,34 @@ set -euo pipefail
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$INSTALL_DIR"
 
-PORT="${PORT:-3010}"
 LOG_DIR="$INSTALL_DIR/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/update-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "==> NEXOR CRM — atualização iniciada em $(date)"
+
+# 0. Descobrir a porta da instalação real, para o healthcheck bater no lugar certo.
+# Ordem de precedência:
+#   1. Variável PORT definida explicitamente pelo cliente (override deliberado).
+#   2. Porta configurada na unit systemd instalada (wacrm.service) — fonte de
+#      verdade do que está de fato rodando.
+#   3. Padrão 3010.
+# A consulta ao systemd é só leitura e não pode abortar o script se a unit
+# não existir (ex.: instalação rodando fora do systemd).
+if [ -n "${PORT:-}" ]; then
+  echo "==> Porta: $PORT (definida explicitamente pela variável de ambiente PORT)"
+else
+  UNIT_ENV="$(systemctl --user show wacrm.service -p Environment --value 2>/dev/null || true)"
+  UNIT_PORT="$(printf '%s' "$UNIT_ENV" | tr ' ' '\n' | sed -n 's/^PORT=//p' | tail -n1)"
+  if [ -n "$UNIT_PORT" ]; then
+    PORT="$UNIT_PORT"
+    echo "==> Porta: $PORT (detectada na unit systemd wacrm.service)"
+  else
+    PORT=3010
+    echo "==> Porta: $PORT (padrão — não foi possível detectar a unit systemd wacrm.service)"
+  fi
+fi
 
 # 1. Não atropelar alterações locais do cliente
 if ! git diff --quiet || ! git diff --cached --quiet; then

@@ -83,6 +83,11 @@ o CRM voltou a responder. Se qualquer etapa falhar, ele restaura sozinho a
 versão anterior. Se a atualização trouxer migrations novas, elas são listadas ao
 final — aplique-as no Supabase.
 
+O script detecta sozinho a porta da instalação (lendo a unit systemd
+`wacrm.service`), então não é preciso repetir `PORT=...` na hora de atualizar
+mesmo que a instalação tenha usado uma porta customizada. Para forçar outra
+porta explicitamente: `PORT=<valor> bash scripts/update.sh`.
+
 Comandos úteis:
 
 ```bash
