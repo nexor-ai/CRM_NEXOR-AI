@@ -73,3 +73,11 @@ entregas/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code — configuração local do operador.
+# settings.local.json guarda permissões da máquina de quem desenvolve e NUNCA
+# deve ser versionado: este repositório é público e os clientes clonam ele. Uma
+# regra como "Bash(node scripts/migrate.mjs*)" versionada aqui passaria a valer
+# na máquina de qualquer cliente que abrisse o Claude Code no clone dele —
+# autorizando, sem perguntar, um comando que escreve no banco de produção dele.
+.claude/settings.local.json
