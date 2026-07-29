@@ -76,15 +76,32 @@ select
 from checagens
 order by migration;
 
--- A tabela de controle já existe? Se sim, --baseline vai recusar rodar.
+-- `--baseline` decide pela QUANTIDADE DE REGISTROS, não pela existência da
+-- tabela (migrate.mjs: `if (appliedRecords.length > 0)`). A distinção não é
+-- teórica: `ensureMigrationsTable` roda `create table if not exists` logo no
+-- começo de QUALQUER execução, inclusive `--dry-run`. Ou seja, depois do
+-- primeiro dry-run a tabela existe e está vazia — e uma checagem por existência
+-- diz "não use --baseline" exatamente quando --baseline é o comando correto.
 --
--- Sem subconsulta em public.schema_migrations: o Postgres resolve referências a
--- tabelas no parse, antes de avaliar o CASE, então citar a tabela aqui faz a
--- consulta inteira falhar com "relation does not exist" justamente no caso que
--- ela existe para detectar. O runner informa a contagem quando roda.
+-- query_to_xml recebe a consulta como texto e só é avaliada em tempo de
+-- execução, dentro do ramo do CASE. Referenciar public.schema_migrations
+-- diretamente aqui faria a consulta inteira falhar no parse quando a tabela não
+-- existe — que é metade dos casos que este rodapé precisa distinguir.
 select
   case
-    when to_regclass('public.schema_migrations') is null
-      then 'schema_migrations NAO existe — instalação manual, --baseline é o caminho'
-    else 'schema_migrations JA existe — NAO use --baseline; rode o runner sem flags'
+    when to_regclass('public.schema_migrations') is null then
+      'schema_migrations NAO existe — instalação manual: use --baseline NNN'
+    when (
+      xpath(
+        '/row/cnt/text()',
+        query_to_xml(
+          'select count(*) as cnt from public.schema_migrations',
+          false, true, ''
+        )
+      )
+    )[1]::text::bigint = 0 then
+      'schema_migrations existe mas esta VAZIA (0 registros) — use --baseline NNN. '
+      || 'A tabela vazia e efeito colateral normal de um --dry-run anterior.'
+    else
+      'schema_migrations JA TEM registros — NAO use --baseline; rode sem flags'
   end as tabela_de_controle;
