@@ -95,44 +95,58 @@ read_env_var() {
   fi
 }
 
-if [ "$NEEDS_ENV" -eq 1 ]; then
-  # .env acabado de ser criado a partir do exemplo — só tem placeholder, não
-  # existe SUPABASE_DB_URL de verdade para conectar ainda. Rodar o runner
-  # aqui produziria só um erro de connection string inválida. Instalação
-  # segue (build, units) e para no fim como já fazia; a próxima execução de
-  # install.sh, depois do .env preenchido, cai no ramo abaixo e aplica tudo.
-  echo "==> $ENV_FILE recém-criado — migrations puladas nesta execução."
-  echo "    Rode scripts/install.sh de novo depois de preencher $ENV_FILE"
-  echo "    para aplicá-las."
+# Mesma precedência de scripts/update.sh: variável já presente no ambiente do
+# shell (override deliberado do operador) vence; ENV_FILE é só o fallback. As
+# duas pontas precisam concordar, senão o mesmo .env, no mesmo host,
+# resolveria para valores (e para o MESMO ARQUIVO, via NEXOR_ENV) diferentes
+# dependendo de qual script rodou.
+if [ -z "${SUPABASE_DB_URL:-}" ]; then
+  SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$ENV_FILE")"
+  if [ -n "$SUPABASE_DB_URL_FROM_FILE" ]; then
+    export SUPABASE_DB_URL="$SUPABASE_DB_URL_FROM_FILE"
+    echo "==> SUPABASE_DB_URL carregada de $ENV_FILE"
+  fi
+fi
+
+# .env.local.example vem com um valor de exemplo NÃO VAZIO em SUPABASE_DB_URL
+# (postgres://postgres:your-db-password@your-project.supabase.co:...) — de
+# propósito, para o operador ver o formato esperado. Isso significa que
+# "definida" sozinho não basta: um .env recém-copiado tem a variável presente,
+# só que com o placeholder. Sem esta checagem, o guard abaixo passaria e o
+# runner tentaria conectar literalmente em "your-project.supabase.co".
+case "${SUPABASE_DB_URL:-}" in
+  *your-db-password*|*your-project.supabase.co*)
+    echo "AVISO: SUPABASE_DB_URL em $ENV_FILE ainda está com o valor de exemplo"
+    echo "       do .env.local.example (your-db-password / your-project.supabase.co)."
+    echo "       Substitua pela connection string real (Supabase → Project"
+    echo "       Settings → Database → Connection string). Tratando como não"
+    echo "       definida por enquanto."
+    unset SUPABASE_DB_URL
+    ;;
+esac
+
+if [ -z "${SUPABASE_DB_URL:-}" ]; then
+  # AVISO, não ERRO: install.sh precisa continuar re-executável sem essa
+  # variável — é o caminho normal na execução que acabou de criar $ENV_FILE
+  # (só tem placeholder ainda) e também o de uma instalação pré-existente que
+  # nunca preencheu a variável (ela é nova; PORT=3020 bash scripts/install.sh
+  # para trocar de porta, por exemplo, precisa continuar funcionando sem
+  # exigir SUPABASE_DB_URL). Abortar aqui deixaria o "npm ci" de cima feito
+  # mas nem o build nem as units systemd atualizados — pior que só avisar e
+  # seguir.
+  echo "AVISO: SUPABASE_DB_URL não definida (nem no ambiente, nem em $ENV_FILE)"
+  echo "       — migrations puladas nesta execução. Preencha essa variável em"
+  echo "       $ENV_FILE e rode scripts/install.sh de novo (ou"
+  echo "       'node scripts/migrate.mjs' manualmente) antes de considerar a"
+  echo "       instalação pronta para uso."
+  echo "       ATENÇÃO — instalações com schema já aplicado à mão (sem tabela"
+  echo "       public.schema_migrations): NÃO defina SUPABASE_DB_URL em .env"
+  echo "       ainda. Faça backup do banco e rode primeiro, manualmente:"
+  echo "         SUPABASE_DB_URL=... node scripts/migrate.mjs --baseline NNN"
+  echo "       Só depois do baseline concluído é seguro salvar SUPABASE_DB_URL"
+  echo "       em .env e prosseguir. Ver README.md, seção \"Banco de dados e"
+  echo "       migrações\"."
 else
-  # Mesma precedência de scripts/update.sh: variável já presente no ambiente
-  # do shell (override deliberado do operador) vence; ENV_FILE é só o
-  # fallback. As duas pontas precisam concordar, senão o mesmo .env, no
-  # mesmo host, resolveria para valores (e para o MESMO ARQUIVO, via
-  # NEXOR_ENV) diferentes dependendo de qual script rodou.
-  if [ -z "${SUPABASE_DB_URL:-}" ]; then
-    SUPABASE_DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$ENV_FILE")"
-    if [ -n "$SUPABASE_DB_URL_FROM_FILE" ]; then
-      export SUPABASE_DB_URL="$SUPABASE_DB_URL_FROM_FILE"
-      echo "==> SUPABASE_DB_URL carregada de $ENV_FILE"
-    fi
-  fi
-  if [ -z "${SUPABASE_DB_URL:-}" ]; then
-    echo "ERRO: SUPABASE_DB_URL não definida (nem no ambiente, nem em" >&2
-    echo "      $ENV_FILE)." >&2
-    echo "      Obtenha a connection string em Supabase → Project Settings →" >&2
-    echo "      Database → Connection string (a direta do Postgres, não as" >&2
-    echo "      chaves NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) e" >&2
-    echo "      defina SUPABASE_DB_URL em $ENV_FILE antes de instalar." >&2
-    echo "      ATENÇÃO — instalações com schema já aplicado à mão (sem tabela" >&2
-    echo "      public.schema_migrations): NÃO defina SUPABASE_DB_URL em .env" >&2
-    echo "      ainda. Faça backup do banco e rode primeiro, manualmente:" >&2
-    echo "        SUPABASE_DB_URL=... node scripts/migrate.mjs --baseline NNN" >&2
-    echo "      Só depois do baseline concluído é seguro salvar SUPABASE_DB_URL" >&2
-    echo "      em .env e prosseguir. Ver README.md, seção \"Banco de dados e" >&2
-    echo "      migrações\"." >&2
-    exit 1
-  fi
   echo "==> Aplicando migrations pendentes..."
   node scripts/migrate.mjs || {
     echo "ERRO: falha ao aplicar migrations. O CÓDIGO E O ESTADO DO BANCO PODEM TER" >&2

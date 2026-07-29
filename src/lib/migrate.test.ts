@@ -9,8 +9,10 @@ import pg from "pg";
 import {
   computeChecksum,
   computePendingSet,
+  parseArgs,
   parseMigrationFilename,
   resolveBaselineSet,
+  resolveForceChecksumUpdates,
   sanitizeConnectionString,
   shouldRefuseUnbaselinedExistingSchema,
   sortAndValidateMigrationFilenames,
@@ -212,6 +214,108 @@ describe("shouldRefuseUnbaselinedExistingSchema", () => {
         applicationTableCount: 5,
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveForceChecksumUpdates", () => {
+  // Válvula de escape para uma instalação travada por divergência de checksum
+  // depois que uma migration já distribuída foi editada (README: "nunca edite
+  // uma migration já publicada"; quando acontece mesmo assim, isto é o que
+  // destrava sem exigir SQL manual do cliente).
+  const orderedFiles = [
+    { filename: "001_a.sql", checksum: "checksum-a-nova" },
+    { filename: "002_b.sql", checksum: "checksum-b" },
+  ];
+  const appliedRecords = [
+    { filename: "001_a.sql", checksum: "checksum-a-velha" },
+  ];
+
+  it("re-registra o checksum de um arquivo já aplicado e presente no diretório", () => {
+    const { updates, errors } = resolveForceChecksumUpdates(
+      orderedFiles,
+      appliedRecords,
+      ["001_a.sql"],
+    );
+    expect(errors).toEqual([]);
+    expect(updates).toEqual([
+      {
+        filename: "001_a.sql",
+        previousChecksum: "checksum-a-velha",
+        newChecksum: "checksum-a-nova",
+      },
+    ]);
+  });
+
+  it("nomeia todos os arquivos pedidos numa chamada com mais de um nome", () => {
+    const { updates, errors } = resolveForceChecksumUpdates(
+      [...orderedFiles, { filename: "003_c.sql", checksum: "checksum-c-nova" }],
+      [...appliedRecords, { filename: "003_c.sql", checksum: "checksum-c-velha" }],
+      ["001_a.sql", "003_c.sql"],
+    );
+    expect(errors).toEqual([]);
+    expect(updates.map((u) => u.filename)).toEqual(["001_a.sql", "003_c.sql"]);
+  });
+
+  it("recusa (sem atualizar nada) um arquivo que não existe em supabase/migrations/", () => {
+    const { updates, errors } = resolveForceChecksumUpdates(
+      orderedFiles,
+      appliedRecords,
+      ["999_nao_existe.sql"],
+    );
+    expect(updates).toEqual([]);
+    expect(errors).toEqual([
+      expect.stringContaining("999_nao_existe.sql"),
+    ]);
+  });
+
+  it("recusa (sem atualizar nada) um arquivo que existe no disco mas nunca foi aplicado", () => {
+    const { updates, errors } = resolveForceChecksumUpdates(
+      orderedFiles,
+      appliedRecords,
+      ["002_b.sql"],
+    );
+    expect(updates).toEqual([]);
+    expect(errors).toEqual([expect.stringContaining("002_b.sql")]);
+  });
+
+  it("um nome inválido na lista invalida a chamada inteira, mesmo com nomes válidos junto", () => {
+    const { updates, errors } = resolveForceChecksumUpdates(
+      orderedFiles,
+      appliedRecords,
+      ["001_a.sql", "999_nao_existe.sql"],
+    );
+    expect(updates).toEqual([]);
+    expect(errors.length).toBe(1);
+  });
+});
+
+describe("parseArgs — --force-checksum", () => {
+  it("aceita ser repetido para corrigir mais de um arquivo numa chamada", () => {
+    const args = parseArgs([
+      "--force-checksum",
+      "001_a.sql",
+      "--force-checksum",
+      "002_b.sql",
+    ]);
+    expect(args.forceChecksum).toEqual(["001_a.sql", "002_b.sql"]);
+  });
+
+  it("recusa ser combinado com --baseline", () => {
+    expect(() =>
+      parseArgs(["--force-checksum", "001_a.sql", "--baseline", "043"]),
+    ).toThrowError(/--baseline/);
+  });
+
+  it("recusa ser combinado com --dry-run", () => {
+    expect(() =>
+      parseArgs(["--force-checksum", "001_a.sql", "--dry-run"]),
+    ).toThrowError(/--dry-run/);
+  });
+
+  it("exige um nome de arquivo depois da flag", () => {
+    expect(() => parseArgs(["--force-checksum"])).toThrowError(
+      /--force-checksum requer um nome de arquivo/,
+    );
   });
 });
 

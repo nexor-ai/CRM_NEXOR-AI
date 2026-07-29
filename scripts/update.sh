@@ -131,14 +131,34 @@ read_env_var() {
   fi
 }
 
+ENV_FILE="${NEXOR_ENV:-$INSTALL_DIR/.env}"
 if [ -z "${SUPABASE_DB_URL:-}" ]; then
-  ENV_FILE="${NEXOR_ENV:-$INSTALL_DIR/.env}"
   DB_URL_FROM_FILE="$(read_env_var "SUPABASE_DB_URL" "$ENV_FILE")"
   if [ -n "$DB_URL_FROM_FILE" ]; then
     export SUPABASE_DB_URL="$DB_URL_FROM_FILE"
     echo "==> SUPABASE_DB_URL carregada de $ENV_FILE"
   fi
 fi
+
+# .env.local.example vem com um valor de exemplo NÃO VAZIO em SUPABASE_DB_URL
+# (postgres://postgres:your-db-password@your-project.supabase.co:...) — de
+# propósito, para o operador ver o formato esperado. Um .env que teve as
+# chaves de API preenchidas mas não chegou a mexer nesta linha passaria pelo
+# guard de "está vazia?" abaixo mesmo assim, e só falharia adiante com erro
+# de DNS/autenticação no meio de um update.sh já em andamento (checkout feito,
+# npm ci feito) — rollback completo por causa de um valor cosmético que nunca
+# chegou a ser preenchido de verdade. Detecta e trata como não definida aqui,
+# antes de qualquer decisão que dependa dela.
+case "${SUPABASE_DB_URL:-}" in
+  *your-db-password*|*your-project.supabase.co*)
+    echo "AVISO: SUPABASE_DB_URL em $ENV_FILE ainda está com o valor de exemplo"
+    echo "       do .env.local.example (your-db-password / your-project.supabase.co)."
+    echo "       Substitua pela connection string real (Supabase → Project"
+    echo "       Settings → Database → Connection string). Tratando como não"
+    echo "       definida por enquanto."
+    unset SUPABASE_DB_URL
+    ;;
+esac
 
 # Sem SUPABASE_DB_URL (nem no ambiente, nem em .env) o runner
 # (scripts/migrate.mjs) não consegue conectar no Postgres do cliente. Se há

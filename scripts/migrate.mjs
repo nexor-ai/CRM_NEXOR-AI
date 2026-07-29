@@ -149,6 +149,75 @@ export function shouldRefuseUnbaselinedExistingSchema({
   return applicationTableCount > 0;
 }
 
+/**
+ * Decide o efeito de `--force-checksum <filename>` (repetível) — a válvula de
+ * escape para uma instalação travada por divergência de checksum depois que
+ * uma migration já distribuída foi editada (ver comentário em `main()` sobre
+ * imutabilidade de migrations publicadas). Re-registra o checksum atual do
+ * arquivo em `schema_migrations` SEM rodar o SQL de novo — a migration já
+ * rodou uma vez em cada cliente antes da edição, então rodar de novo
+ * duplicaria efeito (e para migrations com `DELETE`, seria destrutivo).
+ *
+ * Cada nome pedido só é aceito se:
+ *   - existe em `orderedFiles` (é uma migration real, não um nome digitado
+ *     errado ou um arquivo que já saiu do diretório); e
+ *   - já tem um registro em `appliedRecords` (existe algo para corrigir —
+ *     `--force-checksum` não é uma forma alternativa de marcar uma migration
+ *     nunca aplicada como aplicada; isso é o que `--baseline` faz, com as
+ *     garantias de tabela vazia que `--baseline` exige).
+ *
+ * Qualquer nome que falhe uma das duas condições é reportado em `errors` e
+ * NENHUMA atualização é aplicada (nem as dos nomes válidos do mesmo comando)
+ * — quem chama deve tratar `errors` não vazio como abortar tudo, para o
+ * operador corrigir o comando e tentar de novo com a lista completa e
+ * correta, em vez de aplicar parcialmente e deixar um estado difícil de
+ * reconstruir qual nome já foi processado.
+ *
+ * Lógica pura: não toca banco. O `update ... set checksum` real é
+ * responsabilidade de quem chama (camada de banco, abaixo).
+ */
+export function resolveForceChecksumUpdates(
+  orderedFiles,
+  appliedRecords,
+  forceChecksumFilenames,
+) {
+  const fileByFilename = new Map(
+    orderedFiles.map((file) => [file.filename, file]),
+  );
+  const appliedByFilename = new Map(
+    appliedRecords.map((record) => [record.filename, record]),
+  );
+
+  const updates = [];
+  const errors = [];
+  for (const filename of forceChecksumFilenames) {
+    const file = fileByFilename.get(filename);
+    if (!file) {
+      errors.push(
+        `${filename}: não encontrado em supabase/migrations/ (nome errado, ou o arquivo não existe mais neste checkout).`,
+      );
+      continue;
+    }
+    const applied = appliedByFilename.get(filename);
+    if (!applied) {
+      errors.push(
+        `${filename}: não está registrado em public.schema_migrations — não há checksum para corrigir. Se a intenção é aplicar esta migration pela primeira vez, rode o runner sem --force-checksum.`,
+      );
+      continue;
+    }
+    updates.push({
+      filename,
+      previousChecksum: applied.checksum,
+      newChecksum: file.checksum,
+    });
+  }
+  // Tudo ou nada: se qualquer nome pedido falhou, `updates` sai vazio mesmo
+  // que outros nomes da mesma chamada fossem válidos — não é o próprio
+  // chamador que decide se ignora `errors` e aplica `updates` mesmo assim; a
+  // função já não entrega nada para aplicar nesse caso.
+  return { updates: errors.length > 0 ? [] : updates, errors };
+}
+
 /** Lê supabase/migrations/*.sql do disco, ordenado e validado. */
 export function discoverMigrationFiles(dir) {
   const filenames = readdirSync(dir).filter((name) => name.endsWith(".sql"));
@@ -318,13 +387,16 @@ async function fetchAppliedRecords(client) {
  * pelo `search_path`) para que uma tabela de mesmo nome em outro schema no
  * search_path do usuário de conexão não possa satisfazer a checagem —
  * queremos saber especificamente sobre `public`, o schema onde este runner
- * cria e altera objetos.
+ * cria e altera objetos. `relkind in ('r', 'p')` cobre tabela normal e
+ * tabela particionada (`p`) — uma migration futura que crie uma das tabelas
+ * de aplicação já particionada não pode escapar da checagem só por ter
+ * `relkind` diferente de `r`.
  */
 async function countApplicationTables(client) {
   const { rows } = await client.query(
     `select count(*) as n
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where c.relkind = 'r'
+     where c.relkind in ('r', 'p')
        and n.nspname = 'public'
        and c.relname = any($1::text[])`,
     [APPLICATION_TABLE_PROBE],
@@ -332,8 +404,8 @@ async function countApplicationTables(client) {
   return Number(rows[0].n);
 }
 
-function parseArgs(argv) {
-  const args = { dryRun: false, baseline: undefined };
+export function parseArgs(argv) {
+  const args = { dryRun: false, baseline: undefined, forceChecksum: [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dry-run") {
@@ -346,12 +418,30 @@ function parseArgs(argv) {
         );
       }
       args.baseline = Number(value);
+    } else if (arg === "--force-checksum") {
+      const value = argv[++i];
+      if (!value) {
+        throw new Error(
+          "--force-checksum requer um nome de arquivo, ex: --force-checksum 047_x.sql (repetível para mais de um arquivo)",
+        );
+      }
+      args.forceChecksum.push(value);
     } else {
       throw new Error(`Argumento desconhecido: ${arg}`);
     }
   }
   if (args.dryRun && args.baseline !== undefined) {
     throw new Error("--dry-run e --baseline não podem ser usados juntos.");
+  }
+  if (args.baseline !== undefined && args.forceChecksum.length > 0) {
+    throw new Error(
+      "--force-checksum e --baseline não podem ser usados juntos: --baseline é para registrar migrations nunca aplicadas sem rodar SQL (tabela de controle vazia); --force-checksum é para corrigir o checksum de uma migration já registrada (tabela de controle não vazia). São operações para situações opostas.",
+    );
+  }
+  if (args.dryRun && args.forceChecksum.length > 0) {
+    throw new Error(
+      "--force-checksum e --dry-run não podem ser usados juntos: --force-checksum sempre grava (é a própria correção); não existe uma versão \"simulada\" dele.",
+    );
   }
   return args;
 }
@@ -413,6 +503,54 @@ async function main() {
     await acquireAdvisoryLock(client);
     await ensureMigrationsTable(client);
     const appliedRecords = await fetchAppliedRecords(client);
+
+    // --force-checksum: válvula de escape para uma instalação travada por
+    // divergência de checksum (ver aviso de imutabilidade mais abaixo, perto
+    // do erro de divergência). Tratado antes de qualquer outra coisa —
+    // inclusive antes da guarda de "schema sem baseline" logo abaixo, que
+    // não se aplica aqui (resolveForceChecksumUpdates já exige registro
+    // existente em schema_migrations, então nunca dispara para um banco
+    // vazio/não baselineado; a mensagem de erro que sai desse caminho é mais
+    // específica do que a da guarda geral).
+    if (args.forceChecksum.length > 0) {
+      const { updates, errors } = resolveForceChecksumUpdates(
+        filesWithChecksum,
+        appliedRecords,
+        args.forceChecksum,
+      );
+      if (errors.length > 0) {
+        console.error(
+          "[migrate] --force-checksum não foi aplicado (nenhuma alteração feita):",
+        );
+        for (const message of errors) console.error(`  ${message}`);
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        await client.query("begin");
+        for (const update of updates) {
+          await client.query(
+            "update public.schema_migrations set checksum = $2 where filename = $1",
+            [update.filename, update.newChecksum],
+          );
+          console.log(
+            `[migrate] checksum re-registrado: ${update.filename} (${update.previousChecksum} -> ${update.newChecksum}), SQL não foi executado.`,
+          );
+        }
+        await client.query("commit");
+      } catch (err) {
+        await client.query("rollback").catch(() => {});
+        console.error(
+          `[migrate] Falha ao re-registrar checksum: ${err.message}. Nada foi alterado (rollback) — pode tentar de novo.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[migrate] --force-checksum concluído: ${updates.length} migration(ões) re-registrada(s).`,
+      );
+      return;
+    }
 
     // Guarda de segurança: schema_migrations vazia (nunca rodou o runner) e
     // nenhum --baseline pedido agora é exatamente a situação em que uma
@@ -499,7 +637,12 @@ async function main() {
     if (divergent.length > 0) {
       const names = divergent.map((d) => d.filename).join(", ");
       console.error(
-        `[migrate] Checksum divergente para migration(ões) já aplicada(s): ${names}. O arquivo foi editado depois de aplicado — continuar produziria um schema imprevisível. Corrija o arquivo (ou reverta a edição) antes de rodar de novo.`,
+        `[migrate] Checksum divergente para migration(ões) já aplicada(s): ${names}. O arquivo foi editado depois de aplicado — continuar produziria um schema imprevisível. ` +
+          "Se você é o operador desta instalação: migrations distribuídas não deveriam ser editadas depois de publicadas (ver README.md, seção \"Banco de dados e migrações\"); " +
+          "avise quem mantém o repositório. Se o arquivo local foi editado por engano, reverta a edição e rode de novo. " +
+          "Se a edição no arquivo distribuído é legítima e definitiva (correção publicada que já foi para todos os clientes), " +
+          "a instalação pode ser destravada sem rodar o SQL de novo com:\n" +
+          `  SUPABASE_DB_URL=... node scripts/migrate.mjs ${divergent.map((d) => `--force-checksum ${d.filename}`).join(" ")}`,
       );
       process.exitCode = 1;
       return;
