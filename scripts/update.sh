@@ -140,6 +140,31 @@ if [ -z "${SUPABASE_DB_URL:-}" ]; then
   fi
 fi
 
+# SUPABASE_DB_CA_PATH precisa vir junto, pela mesma porta. O Supabase assina o
+# certificado do banco com CA própria ("Supabase Root 2021 CA"), que não está
+# no trust store de nenhuma distribuição — e o runner exige verificação de
+# certificado, sem exceção. Sem esta variável, TODA atualização numa instalação
+# Supabase falha em "self-signed certificate in certificate chain" e cai no
+# rollback, mesmo com o .env inteiro preenchido corretamente.
+if [ -z "${SUPABASE_DB_CA_PATH:-}" ]; then
+  DB_CA_FROM_FILE="$(read_env_var "SUPABASE_DB_CA_PATH" "$ENV_FILE")"
+  if [ -n "$DB_CA_FROM_FILE" ]; then
+    export SUPABASE_DB_CA_PATH="$DB_CA_FROM_FILE"
+    echo "==> SUPABASE_DB_CA_PATH carregada de $ENV_FILE"
+  fi
+fi
+
+# Falhar aqui, antes do checkout, é muito melhor do que falhar no runner com o
+# update já em andamento: o caminho errado só apareceria depois de checkout e
+# npm ci, gerando um rollback completo por causa de um arquivo ausente.
+if [ -n "${SUPABASE_DB_CA_PATH:-}" ] && [ ! -r "${SUPABASE_DB_CA_PATH}" ]; then
+  echo "ERRO: SUPABASE_DB_CA_PATH aponta para '${SUPABASE_DB_CA_PATH}', que não" >&2
+  echo "      existe ou não pode ser lido. Baixe o certificado em Supabase →" >&2
+  echo "      Project Settings → Database → SSL Configuration e corrija o" >&2
+  echo "      caminho em $ENV_FILE (use caminho absoluto)." >&2
+  exit 1
+fi
+
 # .env.local.example vem com um valor de exemplo NÃO VAZIO em SUPABASE_DB_URL
 # (postgres://postgres:your-db-password@your-project.supabase.co:...) — de
 # propósito, para o operador ver o formato esperado. Um .env que teve as
