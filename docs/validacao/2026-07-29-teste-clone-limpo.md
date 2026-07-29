@@ -60,10 +60,34 @@ válido.
 Quem for repetir este teste: confira o PID que está escutando na porta antes de
 confiar na resposta.
 
+## Resultado 3 — o modal na tela (Chromium headless)
+
+Feito depois, no mesmo clone, com Playwright. Capturas em
+`aviso-atualizacao-antes.png` e `aviso-atualizacao-depois.png`.
+
+**Antes (2 commits atrás)** — o modal aparece com:
+- título "Atualização disponível"
+- "2 atualizações pendentes • 29/07/2026"
+- os assuntos reais dos dois commits novos
+- bloco "Como atualizar" com `bash scripts/update.sh` e botão "Copiar"
+- link "Ver as mudanças no GitHub" e botão "Fechar"
+
+**Depois (`git checkout --force origin/main`)** — a rota devolve
+`updateAvailable: false` e o modal desaparece; só o formulário de login fica.
+
+### Armadilha que gera falso negativo
+
+Acessar o dev server por `127.0.0.1` em vez de `localhost` faz o Next bloquear
+os recursos de dev por cross-origin ("Blocked cross-origin request to Next.js
+dev resource"). A hidratação não acontece, o `useEffect` nunca roda, e nenhuma
+chamada a `/api/updates` sai — a página renderiza normalmente e parece defeito
+do produto. Custou três rodadas de depuração. **Use `localhost`.**
+
 ## O que este teste NÃO cobre
 
-- Renderização visual do modal. Foi validada a API que o alimenta; o componente
-  React que a consome não tem teste automatizado (registrado desde a Task 5/6).
 - `install.sh` de ponta a ponta contra um Supabase real — o teste usou
   credenciais fictícias, já que `/api/updates` não toca no banco. O middleware
   exige as variáveis do Supabase para qualquer rota responder.
+- Teste automatizado de componente. A verificação visual acima foi manual (via
+  script Playwright, não versionado). O projeto não tem `@testing-library/react`
+  nem ambiente jsdom no Vitest — o `environment` é `node`.
