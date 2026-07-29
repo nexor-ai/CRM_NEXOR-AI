@@ -1,9 +1,14 @@
 # Changelog
 
-User-visible changes in `wacrm`. Self-hosters: when pulling an update,
-check this file for any **migration required** notes and apply the
-matching SQL files from `supabase/migrations/` against your Supabase
-project before restarting the app.
+User-visible changes in `wacrm`. Self-hosters: rode `bash scripts/update.sh`
+— ele aplica as migrations pendentes no seu Supabase automaticamente, antes de
+reconstruir e reiniciar. Não é mais preciso abrir o painel e rodar SQL à mão.
+
+> **Instalação que já existia antes deste canal de atualização** (schema
+> aplicado manualmente, sem a tabela `public.schema_migrations`): faça o
+> baseline UMA vez antes do primeiro `update.sh`. O runner se recusa a rodar
+> nesse estado justamente para não reaplicar migrations sobre dados reais.
+> Procedimento em `README.md`, seção "Instalações com schema aplicado à mão".
 
 Versions follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0, `MINOR` bumps cover new modules; `PATCH` bumps cover bug fixes
