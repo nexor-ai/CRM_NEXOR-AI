@@ -6,6 +6,8 @@ import {
   isSuspending,
   isTerminal,
   evaluateConditionPredicate,
+  interpolateVars,
+  validateCollectedInput,
 } from "./engine";
 
 describe("matchReplyId", () => {
@@ -295,5 +297,66 @@ describe("evaluateConditionPredicate", () => {
         configValue: "anything",
       }),
     ).toBe(false);
+  });
+});
+
+describe("textual interactive reply fallback", () => {
+  const buttons = {
+    node_type: "send_buttons",
+    config: {
+      buttons: [
+        { reply_id: "comercial", title: "Comercial", next_node_key: "sales" },
+        { reply_id: "suporte", title: "Suporte técnico", next_node_key: "support" },
+      ],
+    },
+  };
+
+  it("routes buttons by number, title, or reply_id", () => {
+    expect(matchReplyId(buttons, "2")).toBe("support");
+    expect(matchReplyId(buttons, " suporte TÉCNICO ")).toBe("support");
+    expect(matchReplyId(buttons, "COMERCIAL")).toBe("sales");
+  });
+
+  it("uses a global row number across list sections", () => {
+    const list = {
+      node_type: "send_list",
+      config: {
+        sections: [
+          { rows: [{ reply_id: "a", title: "Primeira", next_node_key: "one" }] },
+          { rows: [{ reply_id: "b", title: "Segunda", next_node_key: "two" }] },
+        ],
+      },
+    };
+    expect(matchReplyId(list, "2")).toBe("two");
+    expect(matchReplyId(list, "segunda")).toBe("two");
+  });
+});
+
+describe("collect_input runtime validation", () => {
+  it("accepts any non-empty value", () => {
+    expect(validateCollectedInput("  Anderson  ", { validation: "any" })).toBe(true);
+    expect(validateCollectedInput("   ", { validation: "any" })).toBe(false);
+  });
+
+  it("validates email and phone inputs", () => {
+    expect(validateCollectedInput("ze@velho.com.br", { validation: "email" })).toBe(true);
+    expect(validateCollectedInput("ze@velho", { validation: "email" })).toBe(false);
+    expect(validateCollectedInput("+55 (11) 99999-9999", { validation: "phone" })).toBe(true);
+    expect(validateCollectedInput("123", { validation: "phone" })).toBe(false);
+  });
+
+  it("validates regex safely and rejects an invalid configured pattern", () => {
+    expect(validateCollectedInput("ZV-42", { validation: "regex", regex: "^ZV-\\d+$" })).toBe(true);
+    expect(validateCollectedInput("42", { validation: "regex", regex: "^ZV-\\d+$" })).toBe(false);
+    expect(validateCollectedInput("anything", { validation: "regex", regex: "[" })).toBe(false);
+  });
+});
+
+describe("interpolateVars", () => {
+  it("interpolates captured variables in handoff notes", () => {
+    expect(interpolateVars("Lead {{vars.nome}} — {{vars.email}}", {
+      nome: "Zé Velho",
+      email: "ze@velho.com.br",
+    })).toBe("Lead Zé Velho — ze@velho.com.br");
   });
 });

@@ -125,21 +125,28 @@ export function NodeConfigForm({
         />
       );
 
-    case "collect_input":
+    case "collect_input": {
+      const collectCfg = cfg as {
+        prompt_text?: string;
+        var_key?: string;
+        validation?: "any" | "email" | "phone" | "regex";
+        regex?: string;
+        next_node_key?: string;
+      };
       return (
         <>
           <TextRow
             label="Pergunta enviada ao cliente"
-            value={(cfg as { prompt_text?: string }).prompt_text ?? ""}
+            value={collectCfg.prompt_text ?? ""}
             onChange={(v) => onUpdateConfig({ prompt_text: v })}
             rows={2}
           />
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">
-              Variable key (stored in flow_runs.vars; alphanumeric + underscore)
+              Chave da variável (letras, números e sublinhado)
             </label>
             <Input
-              value={(cfg as { var_key?: string }).var_key ?? ""}
+              value={collectCfg.var_key ?? ""}
               onChange={(e) =>
                 onUpdateConfig({
                   var_key: e.target.value.replace(/[^a-zA-Z0-9_]/g, ""),
@@ -149,17 +156,49 @@ export function NodeConfigForm({
               className="bg-muted font-mono text-xs"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Interpolate in downstream prompts and handoff notes with{" "}
+              Use nos próximos textos e na nota de transferência com{" "}
               <code className="rounded bg-muted px-1">
                 {"{{vars."}
-                {(cfg as { var_key?: string }).var_key || "name"}
+                {collectCfg.var_key || "nome"}
                 {"}}"}
               </code>
               .
             </p>
           </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted-foreground">
+              Validar resposta como
+            </label>
+            <Select
+              value={collectCfg.validation ?? "any"}
+              onValueChange={(value) => onUpdateConfig({ validation: value })}
+            >
+              <SelectTrigger className="bg-muted">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any">Qualquer texto</SelectItem>
+                <SelectItem value="email">E-mail</SelectItem>
+                <SelectItem value="phone">Telefone</SelectItem>
+                <SelectItem value="regex">Expressão regular</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {collectCfg.validation === "regex" && (
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Expressão regular
+              </label>
+              <Input
+                value={collectCfg.regex ?? ""}
+                onChange={(event) => onUpdateConfig({ regex: event.target.value })}
+                placeholder="ex.: ^ZV-\\d+$"
+                className="bg-muted font-mono text-xs"
+              />
+            </div>
+          )}
           <NextNodeRow
-            value={(cfg as { next_node_key?: string }).next_node_key ?? ""}
+            value={collectCfg.next_node_key ?? ""}
             allNodes={allNodes}
             currentKey={node.node_key}
             onChange={(v) => onUpdateConfig({ next_node_key: v })}
@@ -167,6 +206,7 @@ export function NodeConfigForm({
           />
         </>
       );
+    }
 
     case "condition":
       return (
@@ -189,14 +229,7 @@ export function NodeConfigForm({
       );
 
     case "handoff":
-      return (
-        <TextRow
-          label="Nota interna (para o atendente que assumir)"
-          value={(cfg as { note?: string }).note ?? ""}
-          onChange={(v) => onUpdateConfig({ note: v })}
-          rows={2}
-        />
-      );
+      return <HandoffForm cfg={cfg} onUpdateConfig={onUpdateConfig} />;
 
     case "end":
       return (
@@ -206,6 +239,77 @@ export function NodeConfigForm({
         </p>
       );
   }
+}
+
+interface HandoffMember {
+  user_id: string;
+  full_name: string;
+  role: string;
+}
+
+function HandoffForm({
+  cfg,
+  onUpdateConfig,
+}: {
+  cfg: Record<string, unknown>;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+}) {
+  const [members, setMembers] = useState<HandoffMember[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(true);
+  const note = typeof cfg.note === "string" ? cfg.note : "";
+  const assignTo = typeof cfg.assign_to === "string" ? cfg.assign_to : "";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/account/members", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Falha ao carregar atendentes");
+        return response.json() as Promise<{ members?: HandoffMember[] }>;
+      })
+      .then((payload) => setMembers(payload.members ?? []))
+      .catch((error: unknown) => {
+        if ((error as { name?: string }).name !== "AbortError") {
+          console.error("Failed to load handoff members:", error);
+        }
+      })
+      .finally(() => setLoadingMembers(false));
+    return () => controller.abort();
+  }, []);
+
+  return (
+    <>
+      <TextRow
+        label="Nota interna (aceita {{vars.chave}})"
+        value={note}
+        onChange={(value) => onUpdateConfig({ note: value })}
+        rows={2}
+      />
+      <div>
+        <label className="mb-1 block text-xs text-muted-foreground">
+          Atribuir conversa a
+        </label>
+        <Select
+          value={assignTo || "unassigned"}
+          onValueChange={(value) =>
+            onUpdateConfig({ assign_to: value === "unassigned" ? undefined : value })
+          }
+          disabled={loadingMembers}
+        >
+          <SelectTrigger className="bg-muted">
+            <SelectValue placeholder={loadingMembers ? "Carregando…" : "Sem atribuição"} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="unassigned">Sem atribuição</SelectItem>
+            {members.map((member) => (
+              <SelectItem key={member.user_id} value={member.user_id}>
+                {member.full_name || "Membro sem nome"} · {member.role}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </>
+  );
 }
 
 // ============================================================

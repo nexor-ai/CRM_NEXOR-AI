@@ -4,10 +4,7 @@ Primeira execução real do runner contra o banco de produção da NEXOR AI.
 
 ## Sequência executada
 
-1. **Backup** — `pg_dump` 17.6 via container (o cliente local é 16 e recusa
-   servidor 17), com `--network host` para alcançar o Supabase por IPv6.
-   `/home/hermes/BACKUPS_CRM/supabase-pre-baseline-20260729-144744.sql`,
-   1.1 MB, 81 tabelas, 39 blocos `COPY`, permissão 600, fora do repositório.
+1. **Backup** — o relatório histórico registrava um `pg_dump` 17.6 via container, com 1.1 MB e 81 tabelas. O arquivo não foi localizado em 2026-08-10; ver `docs/operacao/POSTGRES_SUPABASE_STATUS.md`. Nenhum novo dump foi executado nesta reorganização.
 
 2. **Confirmação do NNN** — `scripts/migration-check/detectar-baseline.sql`
    apontou `040`–`043` APLICADA e `044`–`050` faltando. Corte limpo, sem

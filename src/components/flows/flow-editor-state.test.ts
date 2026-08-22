@@ -153,11 +153,15 @@ describe("defaultConfigFor", () => {
     expect(cfg.media_type).toBe("image");
   });
 
-  it("collect_input ships a valid var_key that passes the validator regex", () => {
-    const cfg = defaultConfigFor("collect_input") as { var_key?: string };
+  it("collect_input ships a valid var_key and explicit any validation", () => {
+    const cfg = defaultConfigFor("collect_input") as {
+      var_key?: string;
+      validation?: string;
+    };
     // Mirrors the regex in validate.ts: alphanumeric + underscore,
     // starts with letter or underscore.
     expect(cfg.var_key).toMatch(/^[a-zA-Z_][a-zA-Z0-9_]*$/);
+    expect(cfg.validation).toBe("any");
   });
 
   it("end's default is an empty object (terminal — no config)", () => {

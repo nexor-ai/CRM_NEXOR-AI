@@ -71,20 +71,59 @@ export function matchReplyId(
   node: { node_type: string; config: Record<string, unknown> },
   reply_id: string,
 ): string | null {
+  const normalized = reply_id.trim().toLocaleLowerCase("pt-BR");
+  if (!normalized) return null;
+
   if (node.node_type === "send_buttons") {
     const cfg = node.config as unknown as SendButtonsNodeConfig;
-    const hit = cfg.buttons?.find((b) => b.reply_id === reply_id);
+    const options = cfg.buttons ?? [];
+    const numericIndex = /^\d+$/.test(normalized) ? Number(normalized) - 1 : -1;
+    const hit = options.find(
+      (button, index) =>
+        index === numericIndex ||
+        button.reply_id.trim().toLocaleLowerCase("pt-BR") === normalized ||
+        button.title.trim().toLocaleLowerCase("pt-BR") === normalized,
+    );
     return hit?.next_node_key ?? null;
   }
   if (node.node_type === "send_list") {
     const cfg = node.config as unknown as SendListNodeConfig;
-    for (const section of cfg.sections ?? []) {
-      const hit = section.rows?.find((r) => r.reply_id === reply_id);
-      if (hit) return hit.next_node_key;
-    }
-    return null;
+    const options = (cfg.sections ?? []).flatMap((section) => section.rows ?? []);
+    const numericIndex = /^\d+$/.test(normalized) ? Number(normalized) - 1 : -1;
+    const hit = options.find(
+      (row, index) =>
+        index === numericIndex ||
+        row.reply_id.trim().toLocaleLowerCase("pt-BR") === normalized ||
+        row.title.trim().toLocaleLowerCase("pt-BR") === normalized,
+    );
+    return hit?.next_node_key ?? null;
   }
   return null;
+}
+
+export function validateCollectedInput(
+  value: string,
+  cfg: Pick<CollectInputNodeConfig, "validation" | "regex">,
+): boolean {
+  const captured = value.trim();
+  if (!captured) return false;
+  switch (cfg.validation ?? "any") {
+    case "any":
+      return true;
+    case "email":
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(captured);
+    case "phone": {
+      const normalized = captured.replace(/[\s().-]/g, "");
+      return /^\+?[1-9]\d{7,14}$/.test(normalized);
+    }
+    case "regex":
+      if (!cfg.regex) return false;
+      try {
+        return new RegExp(cfg.regex).test(captured);
+      } catch {
+        return false;
+      }
+  }
 }
 
 /**
@@ -448,7 +487,7 @@ async function executeHandoff(
       .eq("id", run.conversation_id);
   }
   await logEvent(db, run.id, "handoff", node.node_key, {
-    note: cfg.note ?? null,
+    note: cfg.note ? interpolateVars(cfg.note, run.vars) : null,
     assigned_to: cfg.assign_to ?? null,
   });
   await endRun(db, run.id, "handed_off", "handoff_node");
@@ -513,7 +552,7 @@ async function evaluateConditionNode(
  * ("Thanks {{vars.name}}, what's your email?"). Missing vars render as
  * empty string — the same behavior as the automations engine.
  */
-function interpolateVars(template: string, vars: Record<string, unknown>): string {
+export function interpolateVars(template: string, vars: Record<string, unknown>): string {
   if (!template) return "";
   return template.replace(/\{\{vars\.([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
     const v = vars[key];
@@ -826,6 +865,66 @@ async function advanceCurrentNodeKey(
 // Public entry point — the webhook calls this on every inbound.
 // ============================================================
 
+export async function startManualFlow(input: {
+  accountId: string;
+  actorUserId: string;
+  flowId: string;
+  contactId: string;
+  conversationId: string;
+}): Promise<DispatchInboundResult> {
+  const db = supabaseAdmin();
+  try {
+    const activeRun = await loadActiveRunForContact(
+      db,
+      input.accountId,
+      input.contactId,
+    );
+    if (activeRun) {
+      return { consumed: false, flow_run_id: activeRun.id, outcome: "no_match" };
+    }
+
+    const { data, error } = await db
+      .from("flows")
+      .select("*")
+      .eq("id", input.flowId)
+      .eq("account_id", input.accountId)
+      .eq("status", "active")
+      .eq("trigger_type", "manual")
+      .maybeSingle();
+    if (error || !data) {
+      return { consumed: false, outcome: "no_match" };
+    }
+
+    const flow = data as FlowRow;
+    if (!flow.entry_node_id) {
+      return { consumed: false, outcome: "no_match" };
+    }
+    const nodes = await loadAllNodes(db, flow.id);
+    return startNewRun(
+      db,
+      flow,
+      {
+        accountId: input.accountId,
+        userId: input.actorUserId,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        message: {
+          kind: "text",
+          text: "",
+          meta_message_id: `manual:${input.flowId}:${input.conversationId}:${Date.now()}`,
+        },
+      },
+      nodes,
+    );
+  } catch (error) {
+    console.error(
+      "[flows] startManualFlow threw:",
+      error instanceof Error ? error.message : error,
+    );
+    return { consumed: false, outcome: "no_match" };
+  }
+}
+
 export async function dispatchInboundToFlows(
   input: DispatchInboundInput & { isFirstInboundMessage: boolean },
 ): Promise<DispatchInboundResult> {
@@ -925,18 +1024,21 @@ async function handleReplyForActiveRun(
   // Everything else falls through to the fallback policy below.
   let matched: string | null = null;
   if (
-    message.kind === "interactive_reply" &&
+    (message.kind === "interactive_reply" || message.kind === "text") &&
     (currentNode.node_type === "send_buttons" ||
       currentNode.node_type === "send_list")
   ) {
-    matched = matchReplyId(currentNode, message.reply_id);
+    matched = matchReplyId(
+      currentNode,
+      message.kind === "interactive_reply" ? message.reply_id : message.text,
+    );
   } else if (
     message.kind === "text" &&
     currentNode.node_type === "collect_input"
   ) {
     const cfg = currentNode.config as unknown as CollectInputNodeConfig;
     const captured = message.text.trim();
-    if (captured.length > 0 && cfg.var_key) {
+    if (cfg.var_key && validateCollectedInput(captured, cfg)) {
       // Persist captured value + reset reprompt count atomically.
       const newVars = { ...run.vars, [cfg.var_key]: captured };
       const { error: capErr } = await db

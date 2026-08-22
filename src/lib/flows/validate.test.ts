@@ -543,7 +543,38 @@ describe("reachableFromEntry", () => {
         },
       },
     ];
-    const set = reachableFromEntry("a", nodes);
-    expect(set).toEqual(new Set(["a", "b"]));
+    expect(reachableFromEntry("a", nodes)).toEqual(new Set(["a", "b"]));
+  });
+});
+
+describe("collect_input validation configuration", () => {
+  const nodes = (regex?: string) => [
+    { node_key: "start", node_type: "start", config: { next_node_key: "collect" } },
+    {
+      node_key: "collect",
+      node_type: "collect_input",
+      config: {
+        prompt_text: "Informe o código",
+        var_key: "codigo",
+        validation: "regex",
+        regex,
+        next_node_key: "end",
+      },
+    },
+    { node_key: "end", node_type: "end", config: {} },
+  ];
+
+  it("blocks activation when regex is missing", () => {
+    const issues = validateFlowForActivation(validFlow, nodes());
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ node_key: "collect", field: "regex", severity: "error" }),
+    ]));
+  });
+
+  it("blocks activation when regex is syntactically invalid", () => {
+    const issues = validateFlowForActivation(validFlow, nodes("["));
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ node_key: "collect", field: "regex", severity: "error" }),
+    ]));
   });
 });

@@ -399,6 +399,7 @@ async function sendInteractiveViaEvolution(
         to: phone,
         bodyText: input.bodyText,
         buttons: input.buttons,
+        native: true,
         headerText: input.headerText,
         footerText: input.footerText,
       });
@@ -410,6 +411,7 @@ async function sendInteractiveViaEvolution(
       bodyText: input.bodyText,
       buttonLabel: input.buttonLabel,
       sections: input.sections,
+      native: true,
       headerText: input.headerText,
       footerText: input.footerText,
     });

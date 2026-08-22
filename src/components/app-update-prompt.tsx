@@ -74,8 +74,12 @@ export function AppUpdatePrompt() {
   }, []);
 
   useEffect(() => {
-    void checkBuild();
-    void checkUpdate();
+    // Defer the initial async checks so their state updates happen from a
+    // scheduled callback, not synchronously in the effect body.
+    const initialTimer = window.setTimeout(() => {
+      void checkBuild();
+      void checkUpdate();
+    }, 0);
     const buildTimer = window.setInterval(() => void checkBuild(), BUILD_CHECK_INTERVAL_MS);
     const updateTimer = window.setInterval(() => void checkUpdate(), UPDATE_CHECK_INTERVAL_MS);
     const onVisible = () => {
@@ -86,6 +90,7 @@ export function AppUpdatePrompt() {
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
+      window.clearTimeout(initialTimer);
       window.clearInterval(buildTimer);
       window.clearInterval(updateTimer);
       document.removeEventListener('visibilitychange', onVisible);

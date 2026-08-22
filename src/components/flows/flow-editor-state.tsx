@@ -165,6 +165,7 @@ export function defaultConfigFor(type: NodeType): Record<string, unknown> {
       return {
         prompt_text: '',
         var_key: 'answer',
+        validation: 'any',
         next_node_key: '',
       };
     case 'condition':
