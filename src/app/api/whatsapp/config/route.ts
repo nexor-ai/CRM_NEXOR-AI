@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
-import { createInstance, connectInstance, getConnectionState, setInstanceWebhook, logoutInstance, deleteInstance } from '@/lib/whatsapp/evolution-api'
+import { createInstance, connectInstance, getConnectionState, listEvolutionInstances, setInstanceWebhook, logoutInstance, deleteInstance } from '@/lib/whatsapp/evolution-api'
+import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { AmbiguousWhatsAppConfigError, resolveWhatsAppConfigCandidates, type ActiveWhatsAppConfig } from '@/lib/whatsapp/resolve-config'
 import { planWhatsAppConfigWrite, WhatsAppConfigNotFoundError } from '@/lib/whatsapp/config-write-plan'
 import { ForbiddenError, requireRole, toErrorResponse, UnauthorizedError } from '@/lib/auth/account'
@@ -138,10 +139,21 @@ export async function POST(request: Request) {
     }
 
     const linkExisting = body.link_existing === true
-    const requestedBaseUrl = String(body.evolution_base_url || existing?.evolution_base_url || process.env.EVOLUTION_API_URL || '').trim().replace(/\/+$/, '')
+    const sourceConfigId = typeof body.source_config_id === 'string' ? body.source_config_id : null
+    const sourceConfig = linkExisting && sourceConfigId
+      ? configs.find((item) => item.id === sourceConfigId) ?? null
+      : null
+    if (linkExisting && (!sourceConfig || !sourceConfig.evolution_base_url || !sourceConfig.evolution_api_key)) {
+      return NextResponse.json({ error: 'A instância precisa ser vinculada a partir de uma configuração Evolution válida desta conta.' }, { status: 400 })
+    }
+    const requestedBaseUrl = String(
+      linkExisting ? sourceConfig!.evolution_base_url : body.evolution_base_url || existing?.evolution_base_url || process.env.EVOLUTION_API_URL || '',
+    ).trim().replace(/\/+$/, '')
     const instance = String(body.evolution_instance || existing?.evolution_instance || process.env.EVOLUTION_INSTANCE || `wacrm_${accountId.slice(0, 8)}`).trim()
-    let apiKey = String(body.evolution_api_key || (plan.kind === 'create' ? process.env.EVOLUTION_API_KEY : '') || '').trim()
-    if (!body.evolution_api_key && existing?.evolution_api_key) {
+    let apiKey = linkExisting
+      ? decrypt(sourceConfig!.evolution_api_key!)
+      : String(body.evolution_api_key || (plan.kind === 'create' ? process.env.EVOLUTION_API_KEY : '') || '').trim()
+    if (!linkExisting && !body.evolution_api_key && existing?.evolution_api_key) {
       try { apiKey = decrypt(existing.evolution_api_key) }
       catch { return NextResponse.json({ error: 'Não foi possível descriptografar a chave armazenada. Cole a apikey novamente.' }, { status: 400 }) }
     }
@@ -152,6 +164,26 @@ export async function POST(request: Request) {
     catch (error) {
       console.warn('[whatsapp/config] blocked Evolution URL:', error instanceof Error ? error.message : 'invalid URL')
       return NextResponse.json({ error: 'A URL base da Evolution não é permitida pela política do servidor' }, { status: 400 })
+    }
+
+    if (linkExisting) {
+      const remote = await listEvolutionInstances({ baseUrl, apiKey })
+      if (!remote.some((item) => item.name === instance)) {
+        return NextResponse.json({ error: 'A instância selecionada não existe ou não está acessível na Evolution.' }, { status: 404 })
+      }
+      const { data: foreignLink, error: foreignLinkError } = await supabaseAdmin()
+        .from('whatsapp_config')
+        .select('id')
+        .eq('provider', 'evolution')
+        .eq('evolution_base_url', baseUrl)
+        .eq('evolution_instance', instance)
+        .is('disabled_at', null)
+        .neq('account_id', accountId)
+        .maybeSingle()
+      if (foreignLinkError) throw foreignLinkError
+      if (foreignLink) {
+        return NextResponse.json({ error: 'Esta instância Evolution já está vinculada a outra conta CRM.' }, { status: 409 })
+      }
     }
 
     if (!linkExisting && plan.kind === 'create') {
@@ -173,7 +205,9 @@ export async function POST(request: Request) {
       catch (error) { console.warn('[whatsapp/config] webhook set failed:', error instanceof Error ? error.message : error) }
     }
 
-    const state = await getConnectionState({ baseUrl, instance, apiKey }).catch(() => ({ state: 'connecting' }))
+    const state = linkExisting
+      ? await getConnectionState({ baseUrl, instance, apiKey })
+      : await getConnectionState({ baseUrl, instance, apiKey }).catch(() => ({ state: 'connecting' }))
     const row: Record<string, unknown> = {
       evolution_base_url: baseUrl, evolution_instance: instance, evolution_api_key: encrypt(apiKey),
       connection_state: state.state, status: state.state === 'open' ? 'connected' : 'disconnected', updated_at: new Date().toISOString(),

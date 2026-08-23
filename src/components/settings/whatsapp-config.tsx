@@ -85,6 +85,7 @@ export function WhatsAppConfig() {
   const [isCreating, setIsCreating] = useState(false);
   const [isLinking, setIsLinking] = useState(false);
   const [availableInstances, setAvailableInstances] = useState<AvailableInstance[]>([]);
+  const [instanceSourceConfigId, setInstanceSourceConfigId] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -144,6 +145,7 @@ export function WhatsAppConfig() {
       setConfigs(items);
       setDepartments(departmentItems);
       setAvailableInstances((instancesPayload.instances ?? []) as AvailableInstance[]);
+      setInstanceSourceConfigId(typeof instancesPayload.source_config_id === 'string' ? instancesPayload.source_config_id : null);
       setIsCreating(false);
       setIsLinking(false);
       const selected = items.find((item) => item.id === payload.selected_config_id)
@@ -204,7 +206,10 @@ export function WhatsAppConfig() {
         department_id: selectedDepartmentId,
       };
       if (isCreating) payload.create_new = true;
-      if (isLinking) payload.link_existing = true;
+      if (isLinking && instanceSourceConfigId) {
+        payload.link_existing = true;
+        payload.source_config_id = instanceSourceConfigId;
+      }
       else if (config?.id) payload.config_id = config.id;
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
@@ -856,7 +861,7 @@ export function WhatsAppConfig() {
           <Button
             type="button"
             onClick={handleSave}
-            disabled={saving || !selectedDepartmentId}
+            disabled={saving || !selectedDepartmentId || (isLinking && !instanceSourceConfigId)}
             className="bg-primary hover:bg-primary/90"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}

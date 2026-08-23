@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
+import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { listEvolutionInstances } from '@/lib/whatsapp/evolution-api'
 import { assertSafeEvolutionBaseUrl } from '@/lib/whatsapp/evolution-url-safety'
@@ -36,10 +37,24 @@ export async function GET() {
     const baseUrl = await assertSafeEvolutionBaseUrl(requestedBaseUrl)
     const remote = await listEvolutionInstances({ baseUrl, apiKey })
     const localByName = new Map(configs.map((item) => [item.evolution_instance, item]))
+    const { data: globallyLinked, error: globallyLinkedError } = await supabaseAdmin()
+      .from('whatsapp_config')
+      .select('account_id, evolution_instance, evolution_base_url')
+      .is('disabled_at', null)
+      .eq('evolution_base_url', baseUrl)
+    if (globallyLinkedError) throw globallyLinkedError
+    const foreignInstanceNames = new Set(
+      (globallyLinked ?? [])
+        .filter((item) => item.account_id !== accountId && item.evolution_instance)
+        .map((item) => String(item.evolution_instance)),
+    )
     return NextResponse.json({
       source: 'evolution',
       base_url: baseUrl,
-      instances: remote.map((item) => {
+      source_config_id: selected?.id ?? null,
+      instances: remote
+        .filter((item) => !foreignInstanceNames.has(item.name) || localByName.has(item.name))
+        .map((item) => {
         const local = localByName.get(item.name) ?? null
         return {
           name: item.name,
