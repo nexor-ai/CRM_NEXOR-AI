@@ -213,6 +213,18 @@ export async function DELETE(request: Request) {
       return selectionError(error) ?? NextResponse.json({ error: 'Não foi possível selecionar a configuração' }, { status: 500 })
     }
     if (!config) return NextResponse.json({ success: true })
+    // Detach is intentionally local-only: it removes this account's CRM
+    // binding without logging out or deleting a shared Evolution instance.
+    // Remote deletion remains the explicit legacy DELETE path below.
+    if (new URL(request.url).searchParams.get('detach') === 'true') {
+      const { error } = await supabase
+        .from('whatsapp_config')
+        .update({ disabled_at: new Date().toISOString(), status: 'disconnected', connection_state: 'close' })
+        .eq('id', config.id)
+        .eq('account_id', accountId)
+      if (error) return NextResponse.json({ error: 'Não foi possível remover a configuração do CRM' }, { status: 500 })
+      return NextResponse.json({ success: true, detached: true, config_id: config.id })
+    }
     if (config.evolution_base_url && config.evolution_instance && config.evolution_api_key) {
       const apiKey = decrypt(config.evolution_api_key)
       await logoutInstance({ baseUrl: config.evolution_base_url, instance: config.evolution_instance, apiKey }).catch(() => undefined)

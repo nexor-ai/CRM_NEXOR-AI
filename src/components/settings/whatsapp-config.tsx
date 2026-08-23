@@ -357,6 +357,31 @@ export function WhatsAppConfig() {
     }
   }
 
+  async function handleDetach() {
+    if (!config?.id) return;
+    if (!confirm('Remover esta instância apenas do CRM? A instância continuará conectada na Evolution.')) return;
+    try {
+      setResetting(true);
+      const res = await fetch(`/api/whatsapp/config?config_id=${encodeURIComponent(config.id)}&detach=true`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Não foi possível remover a instância do CRM');
+        return;
+      }
+      toast.success('Instância removida do CRM. Ela não foi apagada da Evolution.');
+      setConnectionStatus('disconnected');
+      setStatusMessage('');
+      setQrCode(null);
+      setResetReason(null);
+      if (accountId) await fetchConfig(accountId);
+    } catch (err) {
+      console.error('Detach error:', err);
+      toast.error('Não foi possível remover a instância do CRM');
+    } finally {
+      setResetting(false);
+    }
+  }
+
   if (loading) {
     return (
       <section className="animate-in fade-in-50 duration-200">
@@ -747,6 +772,18 @@ export function WhatsAppConfig() {
               </AccordionItem>
             </Accordion>
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-2">
+          {config && !isCreating && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleDetach}
+              disabled={resetting}
+              className="border-destructive/50 text-destructive hover:bg-destructive/10"
+            >
+              {resetting ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
+              Remover do CRM
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
