@@ -847,6 +847,7 @@ async function processMessage(
   }
 ) {
   const senderPhone = normalizePhone(message.from);
+  const departmentId = await resolveInboundDepartmentId(accountId, config.departmentId ?? null);
   const contactOutcome = await findOrCreateContact(
     accountId,
     configOwnerUserId,
@@ -857,7 +858,8 @@ async function processMessage(
   const convResult = await findOrCreateConversation(
     accountId,
     configOwnerUserId,
-    contactRecord.id
+    contactRecord.id,
+    departmentId,
   );
   const conversation = convResult.conversation;
   if (convResult.created)
@@ -946,7 +948,7 @@ async function processMessage(
       messageId: internalMessageId,
       conversationId: conversation.id,
       whatsappConfigId: config.id,
-      departmentId: config.departmentId ?? null,
+      departmentId,
       mediaReference: message.audio.url,
       mimeType: message.audio.mime_type,
       sizeBytes: message.audio.size_bytes,
@@ -1052,7 +1054,7 @@ async function processMessage(
         conversationId: conversation.id,
         configOwnerUserId,
         whatsappConfigId: config.id,
-        departmentId: config.departmentId ?? null,
+        departmentId,
       });
       return { completed: true };
     });
@@ -1155,10 +1157,25 @@ async function findOrCreateContact(
   return { contact: data, created: true };
 }
 
+async function resolveInboundDepartmentId(accountId: string, configuredDepartmentId: string | null): Promise<string> {
+  if (configuredDepartmentId) return configuredDepartmentId;
+  const { data, error } = await supabaseAdmin()
+    .from('departments')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('is_default', true)
+    .maybeSingle();
+  if (error || !data?.id) {
+    throw new Error(`Failed to resolve default department for inbound conversation: ${error?.message ?? 'default department missing'}`);
+  }
+  return String(data.id);
+}
+
 async function findOrCreateConversation(
   accountId: string,
   userId: string,
-  contactId: string
+  contactId: string,
+  departmentId: string,
 ) {
   const { data: existing, error: existingError } = await supabaseAdmin()
     .from('conversations')
@@ -1170,7 +1187,7 @@ async function findOrCreateConversation(
   if (existing) return { conversation: existing, created: false };
   const { data, error } = await supabaseAdmin()
     .from('conversations')
-    .insert({ account_id: accountId, user_id: userId, contact_id: contactId })
+    .insert({ account_id: accountId, user_id: userId, contact_id: contactId, department_id: departmentId })
     .select()
     .single();
   if (error) {

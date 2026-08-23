@@ -40,6 +40,14 @@ type ConfigItem = WhatsAppConfigType & {
   department?: { id: string; name: string; is_default: boolean } | null;
 };
 type DepartmentItem = { id: string; name: string; is_default: boolean };
+type AvailableInstance = {
+  name: string;
+  state: string;
+  linked: boolean;
+  config_id: string | null;
+  department_id: string | null;
+  local_connection_state: string | null;
+};
 
 // Evolution sometimes returns `qrcode.base64` as a bare base64 PNG payload
 // (no `data:` prefix) instead of a ready-to-use data URL. A real QR PNG's
@@ -75,6 +83,8 @@ export function WhatsAppConfig() {
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
   const [selectedDepartmentId, setSelectedDepartmentId] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [isLinking, setIsLinking] = useState(false);
+  const [availableInstances, setAvailableInstances] = useState<AvailableInstance[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -108,6 +118,7 @@ export function WhatsAppConfig() {
   const [verifyingRegistration, setVerifyingRegistration] = useState(false);
   type RegistrationProbe = {
     live: boolean;
+    connection_state?: string;
     checks: Record<string, boolean | null>;
     errors?: string[];
   };
@@ -119,18 +130,22 @@ export function WhatsAppConfig() {
     void _acctId;
     setLoading(true);
     try {
-      const [configRes, departmentRes] = await Promise.all([
+      const [configRes, departmentRes, instancesRes] = await Promise.all([
         fetch('/api/whatsapp/config'),
         fetch('/api/departments'),
+        fetch('/api/whatsapp/config/instances'),
       ]);
       const payload = await configRes.json();
       const departmentPayload = await departmentRes.json();
+      const instancesPayload = instancesRes.ok ? await instancesRes.json() : { instances: [] };
       if (!configRes.ok && configRes.status !== 409) throw new Error(payload.error || 'config_load_failed');
       const items = (payload.configurations ?? []) as ConfigItem[];
       const departmentItems = (departmentPayload.departments ?? []) as DepartmentItem[];
       setConfigs(items);
       setDepartments(departmentItems);
+      setAvailableInstances((instancesPayload.instances ?? []) as AvailableInstance[]);
       setIsCreating(false);
+      setIsLinking(false);
       const selected = items.find((item) => item.id === payload.selected_config_id)
         ?? items.find((item) => item.is_default)
         ?? items[0]
@@ -189,6 +204,7 @@ export function WhatsAppConfig() {
         department_id: selectedDepartmentId,
       };
       if (isCreating) payload.create_new = true;
+      if (isLinking) payload.link_existing = true;
       else if (config?.id) payload.config_id = config.id;
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
@@ -212,7 +228,13 @@ export function WhatsAppConfig() {
       // Evolution uses QR/pairing-code connectivity. The route returns the
       // current instance state and, when needed, a QR payload from
       // GET /instance/connect/:instanceName.
-      if (data.registration_skipped) {
+      if (isLinking) {
+        toast.success(
+          data.connection_state === 'open'
+            ? 'Instância existente vinculada ao CRM e já conectada.'
+            : 'Instância existente vinculada ao CRM. Use o QR apenas se ela ainda não estiver aberta.',
+        );
+      } else if (data.registration_skipped) {
         // Credentials saved + verified, but /register was skipped
         // Evolution pairs devices by QR/pairing code. If the instance is not
         // open yet, keep the UI honest and show the QR payload instead of
@@ -311,13 +333,16 @@ export function WhatsAppConfig() {
       });
       const data = (await res.json()) as RegistrationProbe;
       setRegistrationProbe(data);
-      if (data.live) {
-        toast.success('Número totalmente conectado — a Evolution está entregando os eventos.');
-      } else {
-        toast.error(
-          'A instância Evolution ainda não está aberta. Salve a configuração de novo para atualizar o QR/código de pareamento.',
-          { duration: 8000 },
+      const instanceOpen = data.connection_state === 'open' || data.checks.instance_open === true;
+      setConnectionStatus(instanceOpen ? 'connected' : 'disconnected');
+      if (instanceOpen) {
+        toast.success(
+          data.live
+            ? 'Instância e webhook estão operacionais.'
+            : 'Instância está aberta. Revise os itens de webhook pendentes no diagnóstico abaixo.',
         );
+      } else {
+        toast.error('A instância Evolution não está aberta. Atualize o QR/código de pareamento.');
       }
       if (accountId) await fetchConfig(accountId);
     } catch (err) {
@@ -415,6 +440,7 @@ export function WhatsAppConfig() {
             variant="outline"
             onClick={() => {
               setIsCreating(true);
+              setIsLinking(false);
               hydrateForm(null);
               const fallback = departments.find((item) => item.is_default) ?? departments[0];
               setSelectedDepartmentId(fallback?.id ?? '');
@@ -430,7 +456,7 @@ export function WhatsAppConfig() {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => { setIsCreating(false); hydrateForm(item); }}
+                onClick={() => { setIsCreating(false); setIsLinking(false); hydrateForm(item); }}
                 className={`rounded-lg border p-4 text-left transition-colors ${!isCreating && config?.id === item.id ? 'border-primary bg-primary/10' : 'border-border bg-muted/40 hover:bg-muted'}`}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -447,9 +473,42 @@ export function WhatsAppConfig() {
               <p className="text-sm text-muted-foreground">Nenhuma instância configurada.</p>
             )}
           </div>
+          {availableInstances.some((item) => !item.linked) && (
+            <div className="mt-5 border-t border-border pt-4">
+              <p className="text-sm font-medium text-foreground">Instâncias disponíveis na Evolution</p>
+              <p className="mt-1 text-xs text-muted-foreground">Vincular registra a instância no CRM sem criá-la, gerar QR ou alterar a Evolution.</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {availableInstances.filter((item) => !item.linked).map((item) => (
+                  <div key={item.name} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-foreground">{item.name}</p>
+                      <p className="text-xs text-muted-foreground">Evolution: {item.state}</p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const fallback = departments.find((department) => department.is_default) ?? departments[0];
+                        setIsCreating(true);
+                        setIsLinking(true);
+                        hydrateForm(null);
+                        setEvolutionInstance(item.name);
+                        setSelectedDepartmentId(fallback?.id ?? '');
+                      }}
+                    >
+                      Vincular
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {isCreating && (
             <p className="mt-3 rounded-lg border border-primary/40 bg-primary/10 px-4 py-3 text-sm text-foreground">
-              Preparando uma nova instância. A instância padrão atual não será sobrescrita.
+              {isLinking
+                ? 'Preparando o vínculo de uma instância já existente. Nenhuma ação será feita na Evolution até você confirmar.'
+                : 'Preparando uma nova instância. A instância padrão atual não será sobrescrita.'}
             </p>
           )}
         </CardContent>
@@ -801,7 +860,7 @@ export function WhatsAppConfig() {
             className="bg-primary hover:bg-primary/90"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-            {isCreating ? 'Criar instância' : 'Salvar configuração'}
+            {isLinking ? 'Vincular ao CRM' : isCreating ? 'Criar instância' : 'Salvar configuração'}
           </Button>
         </div>
 

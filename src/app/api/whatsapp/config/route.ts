@@ -137,6 +137,7 @@ export async function POST(request: Request) {
       }
     }
 
+    const linkExisting = body.link_existing === true
     const requestedBaseUrl = String(body.evolution_base_url || existing?.evolution_base_url || process.env.EVOLUTION_API_URL || '').trim().replace(/\/+$/, '')
     const instance = String(body.evolution_instance || existing?.evolution_instance || process.env.EVOLUTION_INSTANCE || `wacrm_${accountId.slice(0, 8)}`).trim()
     let apiKey = String(body.evolution_api_key || (plan.kind === 'create' ? process.env.EVOLUTION_API_KEY : '') || '').trim()
@@ -153,17 +154,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'A URL base da Evolution não é permitida pela política do servidor' }, { status: 400 })
     }
 
-    try { await createInstance({ baseUrl, instance, apiKey }) }
-    catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/already exists|already registered|already in use|409|Conflict/i.test(message)) {
-        return NextResponse.json({ error: 'Não foi possível criar a instância Evolution' }, { status: 400 })
+    if (!linkExisting && plan.kind === 'create') {
+      try { await createInstance({ baseUrl, instance, apiKey }) }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!/already exists|already registered|already in use|409|Conflict/i.test(message)) {
+          return NextResponse.json({ error: 'Não foi possível criar a instância Evolution' }, { status: 400 })
+        }
       }
     }
     let qr: { base64?: string; code?: string; pairingCode?: string } = {}
-    try { qr = await connectInstance({ baseUrl, instance, apiKey }) }
-    catch (error) { console.warn('[whatsapp/config] QR fetch failed:', error instanceof Error ? error.message : error) }
-    if (process.env.WHATSAPP_WEBHOOK_TOKEN) {
+    if (!linkExisting && plan.kind === 'create') {
+      try { qr = await connectInstance({ baseUrl, instance, apiKey }) }
+      catch (error) { console.warn('[whatsapp/config] QR fetch failed:', error instanceof Error ? error.message : error) }
+    }
+    if (!linkExisting && plan.kind === 'create' && process.env.WHATSAPP_WEBHOOK_TOKEN) {
       try { await setInstanceWebhook({ baseUrl, instance, apiKey, url: siteWebhookUrl(request), webhookScopeId: accountId }) }
       catch (error) { console.warn('[whatsapp/config] webhook set failed:', error instanceof Error ? error.message : error) }
     }

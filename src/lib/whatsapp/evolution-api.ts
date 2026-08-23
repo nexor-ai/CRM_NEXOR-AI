@@ -9,6 +9,7 @@ import type { MessageTemplate } from '@/types'
 import { isIP, type LookupFunction } from 'node:net'
 import { Agent } from 'undici'
 import { resolveSafeEvolutionTarget } from './evolution-url-safety'
+import { normalizeEvolutionInstanceList, type EvolutionInstanceSnapshot } from './evolution-instance-manager'
 import { evolutionWebhookTokenForScope } from './webhook-signature'
 import {
   type InteractiveButton,
@@ -216,6 +217,13 @@ export async function createInstance(args: EvolutionCredentials): Promise<{ qrco
   })
   if (!res.ok) await throwEvolutionError(res, `Evolution instance create failed: ${res.status}`)
   return res.json()
+}
+
+/** Lists existing remote instances; it never creates, connects, logs out or mutates Evolution. */
+export async function listEvolutionInstances(args: EvolutionCredentials): Promise<EvolutionInstanceSnapshot[]> {
+  const res = await evolutionFetch(args, '/instance/fetchInstances')
+  if (!res.ok) await throwEvolutionError(res, `Evolution instance list failed: ${res.status}`)
+  return normalizeEvolutionInstanceList(await res.json())
 }
 
 export async function connectInstance(args: EvolutionCredentials): Promise<{ base64?: string; code?: string; pairingCode?: string }> {
