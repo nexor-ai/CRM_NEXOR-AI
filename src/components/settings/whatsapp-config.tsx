@@ -29,6 +29,8 @@ import {
 import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
 
 const MASKED_TOKEN = '••••••••••••••••';
+const DEFAULT_EVOLUTION_BASE_URL =
+  process.env.NEXT_PUBLIC_EVOLUTION_API_URL || 'http://127.0.0.1:8080';
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
 type ResetReason = 'token_corrupted' | 'evolution_api_error' | null;
@@ -92,7 +94,7 @@ export function WhatsAppConfig() {
 
   const hydrateForm = useCallback((item: ConfigItem | null) => {
     setConfig(item);
-    setEvolutionBaseUrl(item?.evolution_base_url || 'http://127.0.0.1:8080');
+    setEvolutionBaseUrl(item?.evolution_base_url || DEFAULT_EVOLUTION_BASE_URL);
     setEvolutionInstance(item?.evolution_instance || '');
     setAccessToken(item ? MASKED_TOKEN : '');
     setSelectedDepartmentId(item?.department_id || '');
@@ -611,7 +613,7 @@ export function WhatsAppConfig() {
             <div className="space-y-2">
               <Label className="text-muted-foreground">URL base da API Evolution</Label>
               <Input
-                placeholder="http://127.0.0.1:8080"
+                placeholder={DEFAULT_EVOLUTION_BASE_URL}
                 value={evolutionBaseUrl}
                 onChange={(e) => setEvolutionBaseUrl(e.target.value)}
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
@@ -689,8 +691,8 @@ export function WhatsAppConfig() {
                 </AccordionTrigger>
                 <AccordionContent className="text-muted-foreground">
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Use a API Evolution local em <code className="text-foreground">http://127.0.0.1:8080</code> a partir do servidor do CRM.</li>
-                    <li>O gerenciador/API via Tailscale está disponível em <code className="text-foreground">https://vps-contabo.tail23fa54.ts.net:8080</code>.</li>
+                    <li>Use a URL base da API Evolution liberada pelo operador; nesta instalação, o padrão é carregado automaticamente.</li>
+                    <li>Use apenas a origem da API, sem <code className="text-foreground">/manager</code>, caminho, consulta ou fragmento.</li>
                     <li>A autenticação usa o cabeçalho <code className="text-foreground">apikey</code> da Evolution, não tokens da Meta.</li>
                   </ol>
                 </AccordionContent>
