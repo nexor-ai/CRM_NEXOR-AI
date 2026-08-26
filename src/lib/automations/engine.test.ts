@@ -46,6 +46,7 @@ vi.mock("./admin-client", () => {
       return { data: null, error: null };
     }
     if (table === "automations") return { data: state.automations, error: null };
+    if (table === "departments") return { data: { id: "dept-default" }, error: null };
     if (table === "automation_logs") {
       if (type === "insert") return { data: { id: "log1" }, error: null };
       if (type === "update") return { data: { id: "log1" }, error: null };

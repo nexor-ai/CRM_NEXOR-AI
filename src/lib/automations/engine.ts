@@ -263,8 +263,47 @@ async function validatePendingExecutionScope(pending: PendingExecution): Promise
 // Internal execution
 // ------------------------------------------------------------
 
+/**
+ * Department for a new automation_logs/automation_pending_executions row.
+ * Mirrors the conversations.department_id backfill from migration 046:
+ * the conversation's own department when known, else the account's
+ * default department. Both columns are NOT NULL since that migration.
+ */
+async function resolveDepartmentId(
+  db: ReturnType<typeof supabaseAdmin>,
+  accountId: string,
+  conversationId: string | null
+): Promise<string | null> {
+  if (conversationId) {
+    const { data } = await db
+      .from('conversations')
+      .select('department_id')
+      .eq('id', conversationId)
+      .eq('account_id', accountId)
+      .maybeSingle()
+    if (data?.department_id) return data.department_id as string
+  }
+  const { data: dept } = await db
+    .from('departments')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('is_default', true)
+    .maybeSingle()
+  return (dept?.id as string) ?? null
+}
+
 async function executeAutomation(automation: Automation, input: DispatchInput) {
   const db = supabaseAdmin()
+
+  const departmentId = await resolveDepartmentId(
+    db,
+    automation.account_id,
+    input.context?.conversation_id ?? null
+  )
+  if (!departmentId) {
+    console.error('[automations] cannot resolve department_id for account', automation.account_id)
+    return
+  }
 
   const { data: log, error: logErr } = await db
     .from('automation_logs')
@@ -272,6 +311,7 @@ async function executeAutomation(automation: Automation, input: DispatchInput) {
       automation_id: automation.id,
       // Tenancy: matches automation.account_id (NOT NULL post-017).
       account_id: automation.account_id,
+      department_id: departmentId,
       // Audit: keeps the historical "author of this automation"
       // pointer so logs still attribute to the right user even
       // after teammates join the account.
@@ -361,10 +401,21 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
     if (step.step_type === 'wait') {
       const cfg = step.step_config as WaitStepConfig
       const ms = waitMs(cfg)
+      const departmentId = await resolveDepartmentId(
+        db,
+        args.automation.account_id,
+        args.context?.conversation_id ?? null
+      )
+      if (!departmentId) {
+        throw new Error(
+          `wait enqueue failed: cannot resolve department_id for account ${args.automation.account_id}`
+        )
+      }
       const { error: pendingError } = await db.from('automation_pending_executions').insert({
         automation_id: args.automation.id,
         // Tenancy: account_id required NOT NULL post-017.
         account_id: args.automation.account_id,
+        department_id: departmentId,
         user_id: args.automation.user_id,
         contact_id: args.contactId,
         log_id: args.logId,
